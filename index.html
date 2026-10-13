@@ -81,7 +81,25 @@
               <div class="tutor-view-toggle" role="tablist" aria-label="Visualizer view">
                 <button id="tutorMemoryViewButton" class="view-toggle-button active" type="button" role="tab" aria-selected="true">Variables</button>
                 <button id="tutorTreeViewButton" class="view-toggle-button" type="button" role="tab" aria-selected="false">Tree</button>
+                <button id="tutorGraphViewButton" class="view-toggle-button" type="button" role="tab" aria-selected="false">Graph</button>
               </div>
+
+              <section id="tutorGraphView" class="tutor-tree-view" hidden aria-label="Graph visualization">
+                <div id="tutorGraphLegend" class="tree-legend"></div>
+                <div class="graph-stage">
+                  <div class="graph-canvas-wrap">
+                    <div class="graph-zoom" role="group" aria-label="Graph zoom">
+                      <button id="graphZoomOutButton" type="button" title="Zoom out" aria-label="Zoom out">−</button>
+                      <input id="graphZoomInput" type="text" inputmode="numeric" value="100" aria-label="Zoom percent">
+                      <span class="graph-zoom-suffix">%</span>
+                      <button id="graphZoomInButton" type="button" title="Zoom in" aria-label="Zoom in">+</button>
+                    </div>
+                    <div id="tutorGraphCanvas" class="tree-canvas"></div>
+                  </div>
+                  <aside id="tutorGraphSearch" class="graph-search" hidden aria-label="BFS and DFS search state"></aside>
+                </div>
+                <div id="tutorGraphAdjacency" class="graph-adjacency" hidden></div>
+              </section>
 
               <section id="tutorTreeView" class="tutor-tree-view" hidden aria-label="Tree visualization">
                 <div id="tutorTreeLegend" class="tree-legend"></div>

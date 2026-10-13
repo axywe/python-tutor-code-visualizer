@@ -30,6 +30,16 @@ const tutorTreeCanvas = document.querySelector("#tutorTreeCanvas");
 const tutorTreeQueues = document.querySelector("#tutorTreeQueues");
 const tutorMemoryViewButton = document.querySelector("#tutorMemoryViewButton");
 const tutorTreeViewButton = document.querySelector("#tutorTreeViewButton");
+const tutorGraphView = document.querySelector("#tutorGraphView");
+const tutorGraphLegend = document.querySelector("#tutorGraphLegend");
+const tutorGraphCanvas = document.querySelector("#tutorGraphCanvas");
+const tutorGraphAdjacency = document.querySelector("#tutorGraphAdjacency");
+const tutorGraphSearch = document.querySelector("#tutorGraphSearch");
+const tutorGraphViewButton = document.querySelector("#tutorGraphViewButton");
+const graphZoomOutButton = document.querySelector("#graphZoomOutButton");
+const graphZoomInButton = document.querySelector("#graphZoomInButton");
+const graphZoomInput = document.querySelector("#graphZoomInput");
+const graphZoomBar = document.querySelector(".graph-zoom");
 
 const consoleHeading = document.querySelector("#consoleHeading");
 const scratchConsole = document.querySelector("#scratchConsole");
@@ -836,14 +846,785 @@ function renderTutorTree(frames, heap, labels) {
   if (focus) focus.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 
+// ---------------------------------------------------------------------------
+// Graph View
+// ---------------------------------------------------------------------------
+
+const GRAPH_NAME_PATTERN = /graph|adj|neighbo|network|connection|edge|route|flight|friend|road|link|follow|prereq|depend|^g$/i;
+const GRAPH_EDGE_LIST_PATTERN = /edge|pair|connection|prereq|depend|route|flight|road|link/i;
+const GRAPH_MATRIX_REJECT_PATTERN = /grid|board|maze|image|dp|memo/i;
+const GRAPH_OBJECT_ATTRS = ["neighbors", "neighbours", "adj", "adjacent", "edges", "connections", "links"];
+// Integers are everywhere (counters, lengths), so int-labeled nodes only get pointer tags from node-like names.
+const GRAPH_INT_POINTER_PATTERN = /node|vert|neighbo|nbr|nei|start|end|src|source|dst|dest|target|goal|parent|child|^(u|v|w|x|y|i|j|cur|curr|current)$/i;
+const GRAPH_NEIGHBOR_POINTER_PATTERN = /neighbo|nbr|nei|child|adj|next|^(v|w|to|dst|dest)$/i;
+const GRAPH_ENDPOINT_POINTER_PATTERN = /start|source|src|root|begin|target|goal|end/i;
+const VISITED_NAME_PATTERN = /^(visited|seen|explored|done|marked|vis|discovered|closed|visit)$/i;
+const GRAPH_KIND_LABELS = {
+  dict: "adjacency list (dict)",
+  objects: "node objects",
+  adjlist: "adjacency list (list of lists)",
+  matrix: "adjacency matrix",
+  edges: "edge list"
+};
+const GRAPH_KIND_RANK = { dict: 0, objects: 0, adjlist: 1, matrix: 1, edges: 2 };
+const GRAPH_REPRS = { list: "Adjacency List", matrix: "Adjacency Matrix" };
+const GRAPH_ZOOM_MIN = 25;
+const GRAPH_ZOOM_MAX = 400;
+const GRAPH_ZOOM_STEP = 10;
+const GRAPH_ZOOM_DEFAULT = 100;
+const GRAPH_SEARCH_MODES = { bfs: "BFS", dfs: "DFS" };
+const BFS_FRONTIER_PATTERN = /^(q|queue|que|dq|deque|frontier|to_visit|bfs)$/i;
+const DFS_STACK_PATTERN = /^(stack|stk|dfs)$/i;
+const DFS_FRAME_PATTERN = /^(explore|dfs|walk|search|visit)\(\)$/i;
+
+function stripQuotes(text) {
+  return text.length >= 2 && text.startsWith('"') && text.endsWith('"') ? text.slice(1, -1) : text;
+}
+
+function isNumericPrimitive(encoded) {
+  return encoded?.kind === "primitive" && (encoded.type === "int" || encoded.type === "float");
+}
+
+function graphNodeRef(encoded, heap, allowTuple) {
+  if (!encoded) return null;
+  if (encoded.kind === "primitive") {
+    if (encoded.type !== "str" && encoded.type !== "int") return null;
+    return { key: `${encoded.type}:${encoded.value}`, label: stripQuotes(encoded.value) };
+  }
+  const object = heap[encoded.id];
+  if (!object) return null;
+  if (isInstance(object)) return { key: `obj:${encoded.id}`, label: treeNodeValue(object), objId: encoded.id };
+  if (allowTuple && object.type === "tuple" && object.elements.every((item) => item?.kind === "primitive")) {
+    const label = `(${object.elements.map((item) => stripQuotes(item.value)).join(",")})`;
+    return { key: `tuple:${label}`, label };
+  }
+  return null;
+}
+
+function parseNeighbor(encoded, heap, tupleNodes) {
+  const direct = graphNodeRef(encoded, heap, tupleNodes);
+  if (direct) return { node: direct, weight: null };
+  if (encoded?.kind !== "ref") return null;
+  const pair = heap[encoded.id];
+  if (!pair?.elements || pair.elements.length !== 2 || (pair.type !== "tuple" && pair.type !== "list")) return null;
+  const node = graphNodeRef(pair.elements[0], heap, false);
+  if (!node || !isNumericPrimitive(pair.elements[1])) return null;
+  return { node, weight: pair.elements[1].value };
+}
+
+function createGraphBuilder() {
+  const nodes = new Map();
+  const adjacency = new Map();
+  return {
+    nodes,
+    adjacency,
+    addNode(ref) {
+      if (!nodes.has(ref.key)) {
+        nodes.set(ref.key, ref);
+        adjacency.set(ref.key, []);
+      }
+      return ref.key;
+    },
+    addEdge(fromRef, toRef, weight) {
+      const from = this.addNode(fromRef);
+      const to = this.addNode(toRef);
+      adjacency.get(from).push({ to, weight });
+    }
+  };
+}
+
+function finishGraph(builder, meta) {
+  const { adjacency } = builder;
+  const hasEdge = (from, to, weight) => (adjacency.get(from) || []).some((edge) => edge.to === to && edge.weight === weight);
+
+  if (meta.forceUndirected) {
+    [...adjacency.entries()].forEach(([from, list]) => {
+      [...list].forEach((edge) => {
+        if (!hasEdge(edge.to, from, edge.weight)) adjacency.get(edge.to).push({ to: from, weight: edge.weight });
+      });
+    });
+  }
+
+  let directed = false;
+  adjacency.forEach((list, from) => {
+    if (list.some((edge) => !hasEdge(edge.to, from, edge.weight))) directed = true;
+  });
+  const weighted = [...adjacency.values()].some((list) => list.some((edge) => edge.weight !== null));
+  const nodes = [...builder.nodes.values()];
+  return { ...meta, nodes, nodeKeys: new Set(nodes.map((node) => node.key)), adjacency, directed, weighted };
+}
+
+function detectDictGraph(name, object, heap) {
+  if (!object.entries?.length) return null;
+  const tupleNodes = object.entries.every(([key]) => key?.kind === "ref" && heap[key.id]?.type === "tuple");
+  const keyRefs = object.entries.map(([key]) => graphNodeRef(key, heap, tupleNodes));
+  if (keyRefs.some((ref) => !ref)) return null;
+
+  const builder = createGraphBuilder();
+  keyRefs.forEach((ref) => builder.addNode(ref));
+  let overlap = false;
+
+  for (let index = 0; index < object.entries.length; index++) {
+    const value = object.entries[index][1];
+    const container = value?.kind === "ref" ? heap[value.id] : null;
+    let neighbors;
+    if (container?.elements) {
+      neighbors = container.elements.map((item) => parseNeighbor(item, heap, tupleNodes));
+    } else if (container?.entries) {
+      neighbors = container.entries.map(([key, weight]) => {
+        const node = graphNodeRef(key, heap, tupleNodes);
+        if (!node || !(isNumericPrimitive(weight) || weight?.type === "bool")) return null;
+        return { node, weight: weight.type === "bool" ? null : weight.value };
+      });
+    } else {
+      return null;
+    }
+    if (neighbors.some((neighbor) => !neighbor)) return null;
+    neighbors.forEach((neighbor) => {
+      if (builder.nodes.has(neighbor.node.key)) overlap = true;
+      builder.addEdge(keyRefs[index], neighbor.node, neighbor.weight);
+    });
+  }
+
+  if (!overlap && !GRAPH_NAME_PATTERN.test(name)) return null;
+  return finishGraph(builder, { kind: "dict", native: "list" });
+}
+
+function detectEdgeList(name, rows, heap) {
+  const builder = createGraphBuilder();
+  for (const row of rows) {
+    if (row.elements.length !== 2 && row.elements.length !== 3) return null;
+    const from = graphNodeRef(row.elements[0], heap, false);
+    const to = graphNodeRef(row.elements[1], heap, false);
+    const weight = row.elements[2];
+    if (!from || !to || (weight && !isNumericPrimitive(weight))) return null;
+    builder.addEdge(from, to, weight ? weight.value : null);
+  }
+  const forceUndirected = !/prereq|depend|follow|dag|topo|directed/i.test(name);
+  return finishGraph(builder, { kind: "edges", native: "list", forceUndirected });
+}
+
+function intNode(index) {
+  return { key: `int:${index}`, label: String(index) };
+}
+
+function detectListGraph(name, object, heap) {
+  const rows = object.elements.map((item) => (item?.kind === "ref" ? heap[item.id] : null));
+  if (!rows.length || rows.some((row) => !row?.elements)) return null;
+  const n = rows.length;
+
+  const tupleRows = rows.every((row) => row.type === "tuple" && row.elements.every((item) => item?.kind === "primitive"));
+  if (GRAPH_EDGE_LIST_PATTERN.test(name) || tupleRows) {
+    const edges = detectEdgeList(name, rows, heap);
+    if (edges) return edges;
+  }
+
+  const square = rows.every((row) => row.elements.length === n);
+  const numeric = rows.every((row) => row.elements.every((cell) => isNumericPrimitive(cell) || cell?.type === "bool"));
+  if (square && numeric && n >= 2 && !GRAPH_MATRIX_REJECT_PATTERN.test(name)) {
+    const isOff = (cell) => ["0", "0.0", "False", "inf"].includes(cell.value);
+    const binary = rows.every((row) => row.elements.every((cell) => ["0", "1", "True", "False"].includes(cell.value)));
+    const symmetricNoLoops = rows.every((row, r) =>
+      isOff(row.elements[r]) && row.elements.every((cell, c) => cell.value === rows[c].elements[r].value));
+    if (GRAPH_NAME_PATTERN.test(name) || (binary && symmetricNoLoops)) {
+      const builder = createGraphBuilder();
+      rows.forEach((_, index) => builder.addNode(intNode(index)));
+      rows.forEach((row, r) => row.elements.forEach((cell, c) => {
+        if (!isOff(cell)) builder.addEdge(intNode(r), intNode(c), binary ? null : cell.value);
+      }));
+      return finishGraph(builder, { kind: "matrix", native: "matrix" });
+    }
+  }
+
+  const neighborRows = rows.map((row) => row.elements.map((item) => parseNeighbor(item, heap, false)));
+  const inRange = neighborRows.every((list) => list.every((neighbor) => {
+    if (!neighbor?.node.key.startsWith("int:")) return false;
+    const index = Number(neighbor.node.label);
+    return index >= 0 && index < n;
+  }));
+  if (inRange && neighborRows.some((list) => list.length) && (GRAPH_NAME_PATTERN.test(name) || !square)) {
+    const builder = createGraphBuilder();
+    rows.forEach((_, index) => builder.addNode(intNode(index)));
+    neighborRows.forEach((list, index) => list.forEach((neighbor) => builder.addEdge(intNode(index), neighbor.node, neighbor.weight)));
+    return finishGraph(builder, { kind: "adjlist", native: "list" });
+  }
+  return null;
+}
+
+function detectObjectGraph(heap) {
+  const instances = Object.values(heap || {}).filter(isInstance);
+  const neighborItems = (object) => GRAPH_OBJECT_ATTRS.flatMap((attr) => {
+    const value = object.attrs[attr];
+    const container = value?.kind === "ref" ? heap[value.id] : null;
+    return container?.elements || [];
+  });
+  const types = new Set();
+  instances.forEach((object) => {
+    if (neighborItems(object).some((item) => item?.kind === "ref" && heap[item.id]?.type === object.type)) types.add(object.type);
+  });
+  if (!types.size) return null;
+
+  const builder = createGraphBuilder();
+  const nodes = instances.filter((object) => types.has(object.type));
+  nodes.forEach((object) => builder.addNode({ key: `obj:${object.id}`, label: treeNodeValue(object), objId: object.id }));
+  nodes.forEach((object) => {
+    neighborItems(object).forEach((item) => {
+      if (item?.kind !== "ref" || !types.has(heap[item.id]?.type)) return;
+      builder.addEdge(builder.nodes.get(`obj:${object.id}`), builder.nodes.get(`obj:${item.id}`), null);
+    });
+  });
+  return finishGraph(builder, { kind: "objects", native: "list" });
+}
+
+function findGraphs(frames, heap, labels) {
+  const found = [];
+  const seen = new Set();
+  const consider = (name, encoded) => {
+    if (encoded?.kind !== "ref" || seen.has(encoded.id)) return;
+    const object = heap[encoded.id];
+    let graph = null;
+    if (object?.entries) graph = detectDictGraph(name, object, heap);
+    else if (object?.elements && (object.type === "list" || object.type === "tuple")) graph = detectListGraph(name, object, heap);
+    if (!graph) return;
+    seen.add(encoded.id);
+    found.push({ ...graph, name, id: encoded.id });
+  };
+
+  [...(frames || [])].reverse().forEach((frame) => {
+    Object.entries(frame.locals || {}).forEach(([name, value]) => consider(name, value));
+  });
+  Object.values(heap || {}).forEach((object) => {
+    if (!isInstance(object)) return;
+    Object.entries(object.attrs).forEach(([name, value]) => consider(`${labelForRef(object.id, heap, labels)}.${name}`, value));
+  });
+
+  const objectGraph = detectObjectGraph(heap);
+  if (objectGraph) {
+    const typeName = heap[objectGraph.nodes[0].objId].type;
+    found.push({ ...objectGraph, name: `${typeName} objects`, id: "objects" });
+  }
+
+  return found.sort((a, b) => GRAPH_KIND_RANK[a.kind] - GRAPH_KIND_RANK[b.kind]);
+}
+
+function graphNodeKeyFor(encoded, graph, heap) {
+  const ref = graphNodeRef(encoded, heap, true);
+  if (ref && graph.nodeKeys.has(ref.key)) return ref.key;
+  const wrapper = encoded?.kind === "ref" ? heap[encoded.id] : null;
+  if (wrapper?.elements?.length && (wrapper.type === "tuple" || wrapper.type === "list")) {
+    const first = graphNodeRef(wrapper.elements[0], heap, false);
+    if (first && graph.nodeKeys.has(first.key)) return first.key;
+  }
+  return null;
+}
+
+function collectGraphPointers(frames, graph, heap) {
+  const pointers = new Map();
+  (frames || []).forEach((frame, index) => {
+    const kind = index === frames.length - 1 ? "active" : "outer";
+    Object.entries(frame.locals || {}).forEach(([name, value]) => {
+      if (name === graph.name) return;
+      const ref = graphNodeRef(value, heap, true);
+      if (!ref || !graph.nodeKeys.has(ref.key)) return;
+      if (ref.key.startsWith("int:") && !GRAPH_INT_POINTER_PATTERN.test(name)) return;
+      if (!pointers.has(ref.key)) pointers.set(ref.key, []);
+      const list = pointers.get(ref.key);
+      if (!list.some((pointer) => pointer.name === name && pointer.kind === kind)) list.push({ name, kind });
+    });
+  });
+  pointers.forEach((list) => list.sort((a, b) => (a.kind === "active" ? -1 : 0) - (b.kind === "active" ? -1 : 0)));
+  return pointers;
+}
+
+function graphFocus(graph, pointers) {
+  const current = new Set();
+  const neighbors = new Set();
+  pointers.forEach((list, key) => {
+    list.filter((pointer) => pointer.kind === "active").forEach(({ name }) => {
+      if (GRAPH_NEIGHBOR_POINTER_PATTERN.test(name)) neighbors.add(key);
+      else if (!GRAPH_ENDPOINT_POINTER_PATTERN.test(name)) current.add(key);
+    });
+  });
+  const isFocusEdge = (from, to) =>
+    from !== to && ((current.has(from) && neighbors.has(to)) || (!graph.directed && current.has(to) && neighbors.has(from)));
+  return { current, neighbors, isFocusEdge };
+}
+
+function collectGraphMarks(frames, graph, heap) {
+  const visited = new Set();
+  const queued = new Set();
+  const sources = [];
+  const seen = new Set();
+  [...(frames || [])].reverse().forEach((frame) => {
+    Object.entries(frame.locals || {}).forEach(([name, value]) => {
+      if (value?.kind !== "ref" || seen.has(value.id)) return;
+      const container = heap[value.id];
+      if (!container) return;
+      if (VISITED_NAME_PATTERN.test(name)) {
+        seen.add(value.id);
+        sources.push({ name, kind: "visited" });
+        if (container.entries) {
+          container.entries.forEach(([key]) => {
+            const nodeKey = graphNodeKeyFor(key, graph, heap);
+            if (nodeKey) visited.add(nodeKey);
+          });
+        } else if (container.elements?.every((item) => item?.kind === "primitive" && item.type === "bool")) {
+          container.elements.forEach((item, index) => item.value === "True" && graph.nodeKeys.has(`int:${index}`) && visited.add(`int:${index}`));
+        } else {
+          (container.elements || []).forEach((item) => {
+            const nodeKey = graphNodeKeyFor(item, graph, heap);
+            if (nodeKey) visited.add(nodeKey);
+          });
+        }
+      } else if (QUEUE_NAME_PATTERN.test(name) && container.elements) {
+        seen.add(value.id);
+        sources.push({ name, kind: "queued" });
+        container.elements.forEach((item) => {
+          const nodeKey = graphNodeKeyFor(item, graph, heap);
+          if (nodeKey) queued.add(nodeKey);
+        });
+      }
+    });
+  });
+  return { visited, queued, sources };
+}
+
+function graphEdgeList(graph) {
+  const edges = [];
+  const drawn = new Set();
+  graph.adjacency.forEach((list, from) => {
+    list.forEach(({ to, weight }) => {
+      const id = graph.directed || from === to ? `${from}->${to}` : [from, to].sort().join("--");
+      if (drawn.has(id)) return;
+      drawn.add(id);
+      edges.push({ from, to, weight });
+    });
+  });
+  return edges;
+}
+
+function graphSearchModeFor(tab) {
+  return GRAPH_SEARCH_MODES[tab?.graphSearch] ? tab.graphSearch : "bfs";
+}
+
+function clampGraphZoom(value) {
+  const parsed = Number.parseInt(String(value ?? "").replace(/[^\d-]/g, ""), 10);
+  if (!Number.isFinite(parsed)) return GRAPH_ZOOM_DEFAULT;
+  return Math.min(GRAPH_ZOOM_MAX, Math.max(GRAPH_ZOOM_MIN, parsed));
+}
+
+function graphZoomFor(tab) {
+  return clampGraphZoom(tab?.graphZoom ?? GRAPH_ZOOM_DEFAULT);
+}
+
+function applyGraphZoom(tab = getActiveTab()) {
+  const zoom = graphZoomFor(tab);
+  if (tab) tab.graphZoom = zoom;
+  if (graphZoomInput && document.activeElement !== graphZoomInput) {
+    graphZoomInput.value = String(zoom);
+  }
+  const svg = tutorGraphCanvas?.querySelector(".graph-svg");
+  if (!svg) {
+    if (graphZoomBar) graphZoomBar.hidden = true;
+    return;
+  }
+  if (graphZoomBar) graphZoomBar.hidden = false;
+  const scale = zoom / 100;
+  const width = Number(svg.dataset.baseWidth) || svg.viewBox.baseVal.width;
+  const height = Number(svg.dataset.baseHeight) || svg.viewBox.baseVal.height;
+  svg.style.width = `${width * scale}px`;
+  svg.style.height = `${height * scale}px`;
+}
+
+function setGraphZoom(value) {
+  const tab = getActiveTab();
+  if (!tab) return;
+  tab.graphZoom = clampGraphZoom(value);
+  applyGraphZoom(tab);
+}
+
+function bumpGraphZoom(delta) {
+  const tab = getActiveTab();
+  if (!tab) return;
+  setGraphZoom(graphZoomFor(tab) + delta);
+}
+
+function nodeLabelFromKey(graph, key) {
+  return graph.nodes.find((node) => node.key === key)?.label ?? "?";
+}
+
+function graphFrontierItems(encoded, graph, heap) {
+  if (encoded?.kind !== "ref") {
+    const key = graphNodeKeyFor(encoded, graph, heap);
+    return key ? [{ key, label: nodeLabelFromKey(graph, key) }] : [];
+  }
+  const container = heap[encoded.id];
+  if (!container?.elements) {
+    const key = graphNodeKeyFor(encoded, graph, heap);
+    return key ? [{ key, label: nodeLabelFromKey(graph, key) }] : [];
+  }
+  return container.elements.flatMap((item) => {
+    const key = graphNodeKeyFor(item, graph, heap);
+    return key ? [{ key, label: nodeLabelFromKey(graph, key) }] : [];
+  });
+}
+
+function findNamedFrontier(frames, graph, heap, namePattern) {
+  let found = null;
+  [...(frames || [])].reverse().forEach((frame) => {
+    Object.entries(frame.locals || {}).forEach(([name, value]) => {
+      if (found || !namePattern.test(name) || value?.kind !== "ref") return;
+      const container = heap[value.id];
+      if (!container?.elements || container.type === "set" || container.type === "frozenset") return;
+      found = { name, items: graphFrontierItems(value, graph, heap) };
+    });
+  });
+  return found;
+}
+
+function findDequeFrontier(frames, graph, heap) {
+  for (const frame of [...(frames || [])].reverse()) {
+    for (const [name, value] of Object.entries(frame.locals || {})) {
+      if (value?.kind !== "ref") continue;
+      const object = heap[value.id];
+      if (object?.type !== "deque") continue;
+      return { name, items: graphFrontierItems(value, graph, heap) };
+    }
+  }
+  return null;
+}
+
+function collectRecursiveNodes(frames, graph, heap) {
+  const items = [];
+  (frames || []).forEach((frame) => {
+    if (!DFS_FRAME_PATTERN.test(frame.name)) return;
+    const match = Object.entries(frame.locals || {}).find(([name, value]) => {
+      if (!/^(node|curr|current|cur|u|v)$/i.test(name)) return false;
+      return Boolean(graphNodeKeyFor(value, graph, heap));
+    });
+    if (!match) return;
+    const key = graphNodeKeyFor(match[1], graph, heap);
+    items.push({ key, label: nodeLabelFromKey(graph, key) });
+  });
+  return items;
+}
+
+function collectSearchState(frames, graph, heap, marks, mode) {
+  const visited = [];
+  const seenKeys = new Set();
+  const addVisited = (key) => {
+    if (!key || seenKeys.has(key)) return;
+    seenKeys.add(key);
+    visited.push({ key, label: nodeLabelFromKey(graph, key) });
+  };
+  const visitedLocal = [...(frames || [])].reverse().flatMap((frame) =>
+    Object.entries(frame.locals || {}).filter(([name, value]) => VISITED_NAME_PATTERN.test(name) && value?.kind === "ref")
+  )[0];
+  if (visitedLocal) graphFrontierItems(visitedLocal[1], graph, heap).forEach((item) => addVisited(item.key));
+  marks.visited.forEach(addVisited);
+
+  let frontier = { name: mode === "bfs" ? "queue" : "call stack", items: [] };
+  if (mode === "bfs") {
+    frontier = findNamedFrontier(frames, graph, heap, BFS_FRONTIER_PATTERN)
+      || findDequeFrontier(frames, graph, heap)
+      || frontier;
+  } else {
+    const stack = findNamedFrontier(frames, graph, heap, DFS_STACK_PATTERN);
+    const recursive = collectRecursiveNodes(frames, graph, heap);
+    if (recursive.length) frontier = { name: "call stack", items: recursive };
+    else if (stack) frontier = stack;
+  }
+
+  const nextIndex = mode === "bfs" ? 0 : frontier.items.length - 1;
+  const next = frontier.items[nextIndex] || null;
+  return { visited, frontier, next, nextIndex, mode };
+}
+
+function renderGraphSearch(search) {
+  const chips = (items, nextKey) => items.length
+    ? items.map((item) =>
+        `<span class="graph-search-chip${item.key === nextKey ? " next" : ""}">${escapeHtml(item.label)}</span>`
+      ).join("")
+    : `<span class="graph-search-empty">none</span>`;
+  const nextKey = search.next?.key;
+  const frontierTitle = search.mode === "bfs" ? search.frontier.name : search.frontier.name;
+  const nextTag = search.mode === "bfs" ? "front" : "current";
+  tutorGraphSearch.hidden = false;
+  tutorGraphSearch.innerHTML = `
+    <div class="graph-search-block">
+      <div class="graph-search-label">Visited</div>
+      <div class="graph-search-chips">${chips(search.visited)}</div>
+    </div>
+    <div class="graph-search-block">
+      <div class="graph-search-label">${escapeHtml(frontierTitle)}${search.next ? ` · ${nextTag} ${escapeHtml(search.next.label)}` : ""}</div>
+      <div class="graph-search-chips">${chips(search.frontier.items, nextKey)}</div>
+    </div>
+    <p class="graph-search-hint">${search.mode === "bfs" ? "BFS next = front of the queue" : "DFS next = current recursive call"}</p>
+  `;
+}
+
+function renderGraphReprToolbar(repr, searchMode) {
+  return `
+    <div class="graph-toolbar-row">
+      <div class="traversal-toolbar">
+        <span class="traversal-label">Show as</span>
+        <div class="tutor-view-toggle traversal-toggle" role="tablist" aria-label="Graph representation">
+          ${Object.entries(GRAPH_REPRS).map(([option, label]) => `
+            <button class="view-toggle-button${option === repr ? " active" : ""}" type="button" role="tab" aria-selected="${option === repr}" data-graph-repr="${option}">${label}</button>`).join("")}
+        </div>
+      </div>
+      <div class="traversal-toolbar">
+        <span class="traversal-label">Search</span>
+        <div class="tutor-view-toggle traversal-toggle" role="tablist" aria-label="Search algorithm">
+          ${Object.entries(GRAPH_SEARCH_MODES).map(([option, label]) => `
+            <button class="view-toggle-button${option === searchMode ? " active" : ""}" type="button" role="tab" aria-selected="${option === searchMode}" data-graph-search="${option}">${label}</button>`).join("")}
+        </div>
+      </div>
+    </div>`;
+}
+
+function renderGraphLegend(frames, graphs, graph, marks, edgeCount, repr, searchMode) {
+  const activeFrame = frames?.[frames.length - 1];
+  const frameName = activeFrame ? escapeHtml(activeFrame.name) : "—";
+  const markNames = (kind) => marks.sources.filter((source) => source.kind === kind).map((source) => source.name).join(", ");
+  const traits = [
+    graph.directed ? "directed" : "undirected",
+    graph.weighted ? "weighted" : "unweighted",
+    `${graph.nodes.length} node${graph.nodes.length === 1 ? "" : "s"}`,
+    `${edgeCount} edge${edgeCount === 1 ? "" : "s"}`
+  ].join(" · ");
+  const picker = graphs.length > 1
+    ? `<div class="tree-legend-row"><span class="traversal-label">Graph</span>${graphs.map((option) => `
+        <button class="graph-source-button${option === graph ? " active" : ""}" type="button" data-graph-source="${escapeHtml(option.name)}">${escapeHtml(option.name)}</button>`).join("")}</div>`
+    : "";
+
+  tutorGraphLegend.innerHTML = `
+    ${picker}
+    <div class="tree-legend-row">
+      <span class="tree-chip active"><strong>${escapeHtml(graph.name)}</strong> ${escapeHtml(GRAPH_KIND_LABELS[graph.kind])}</span>
+      <span class="graph-traits">${traits}</span>
+    </div>
+    <div class="tree-legend-row">
+      <span class="tree-key"><span class="tree-swatch active"></span>Variable in ${frameName}</span>
+      <span class="tree-key"><span class="tree-swatch outer"></span>Variable in an outer frame</span>
+      ${markNames("visited") ? `<span class="tree-key"><span class="tree-swatch visited"></span>In ${escapeHtml(markNames("visited"))}</span>` : ""}
+      ${markNames("queued") ? `<span class="tree-key"><span class="tree-swatch queued"></span>In ${escapeHtml(markNames("queued"))}</span>` : ""}
+    </div>
+    ${renderGraphReprToolbar(repr, searchMode)}
+  `;
+}
+
+function curvedEdgeGeometry(from, to, radius, offset, arrowGap) {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const length = Math.hypot(dx, dy) || 1;
+  const control = {
+    x: (from.x + to.x) / 2 - (dy / length) * offset,
+    y: (from.y + to.y) / 2 + (dx / length) * offset
+  };
+  const toward = (point, target, distance) => {
+    const vx = target.x - point.x;
+    const vy = target.y - point.y;
+    const d = Math.hypot(vx, vy) || 1;
+    return { x: point.x + (vx / d) * distance, y: point.y + (vy / d) * distance };
+  };
+  const start = toward(from, control, radius);
+  const end = toward(to, control, radius + arrowGap);
+  const mid = {
+    x: 0.25 * start.x + 0.5 * control.x + 0.25 * end.x,
+    y: 0.25 * start.y + 0.5 * control.y + 0.25 * end.y
+  };
+  return { path: `M ${start.x} ${start.y} Q ${control.x} ${control.y} ${end.x} ${end.y}`, mid };
+}
+
+function renderGraphSvg(graph, pointers, marks, nextKey) {
+  const count = graph.nodes.length;
+  const longest = Math.max(...graph.nodes.map((node) => Math.min(node.label.length, 8)));
+  const radius = Math.max(16, Math.min(30, 7 + longest * 3.8));
+  const ring = count <= 1 ? 0 : Math.max(80, (count * (radius * 2 + 30)) / (2 * Math.PI));
+  const positions = new Map();
+  graph.nodes.forEach((node, index) => {
+    const angle = -Math.PI / 2 + (2 * Math.PI * index) / Math.max(count, 1);
+    positions.set(node.key, { x: Math.cos(angle) * ring, y: Math.sin(angle) * ring, ux: Math.cos(angle), uy: Math.sin(angle) });
+  });
+
+  const bounds = { minX: -radius, maxX: radius, minY: -radius, maxY: radius };
+  const grow = (x, y) => {
+    bounds.minX = Math.min(bounds.minX, x);
+    bounds.maxX = Math.max(bounds.maxX, x);
+    bounds.minY = Math.min(bounds.minY, y);
+    bounds.maxY = Math.max(bounds.maxY, y);
+  };
+
+  const focus = graphFocus(graph, pointers);
+  const edgeSvg = graphEdgeList(graph).map(({ from, to, weight }) => {
+    const a = positions.get(from);
+    const b = positions.get(to);
+    const active = focus.isFocusEdge(from, to) ? " active" : "";
+    const marker = graph.directed ? ` marker-end="url(#graph-arrow${active ? "-active" : ""})"` : "";
+    let path;
+    let mid;
+    if (from === to) {
+      const cx = a.x + a.ux * (radius + 10);
+      const cy = a.y + a.uy * (radius + 10);
+      grow(cx - 12, cy - 12);
+      grow(cx + 12, cy + 12);
+      path = `M ${cx - 0.01} ${cy - 11} A 11 11 0 1 1 ${cx} ${cy - 11}`;
+      mid = { x: cx + a.ux * 18, y: cy + a.uy * 18 };
+    } else {
+      const reciprocal = graph.directed && graph.adjacency.get(to)?.some((edge) => edge.to === from);
+      ({ path, mid } = curvedEdgeGeometry(a, b, radius, reciprocal ? 16 : 0, graph.directed ? 2 : 0));
+    }
+    const label = weight !== null && weight !== undefined
+      ? `<g class="graph-weight"><rect x="${mid.x - (String(weight).length * 3.6 + 5)}" y="${mid.y - 8}" width="${String(weight).length * 7.2 + 10}" height="16" rx="5" /><text x="${mid.x}" y="${mid.y + 4}">${escapeHtml(weight)}</text></g>`
+      : "";
+    return `<path class="graph-edge${active}" d="${path}"${marker} />${label}`;
+  }).join("");
+
+  const nodeSvg = graph.nodes.map((node) => {
+    const { x, y, ux, uy } = positions.get(node.key);
+    grow(x - radius - 6, y - radius - 6);
+    grow(x + radius + 6, y + radius + 6);
+    const nodePointers = pointers.get(node.key) || [];
+    const state = nodePointers.some((p) => p.kind === "active") ? "active" : nodePointers.length ? "outer" : "";
+    const classes = ["tree-node", state, marks.visited.has(node.key) ? "visited" : ""].filter(Boolean).join(" ");
+    const shownLabel = node.label.length > 8 ? `${node.label.slice(0, 7)}…` : node.label;
+
+    let pointerSvg = "";
+    if (nodePointers.length) {
+      const text = [...new Set(nodePointers.map((p) => p.name))].join(", ");
+      const shown = text.length > 16 ? `${text.slice(0, 15)}…` : text;
+      const width = shown.length * 6.6 + 12;
+      const px = count <= 1 ? x : x + ux * (radius + 10 + (width / 2) * Math.abs(ux));
+      const py = count <= 1 ? y + radius + 16 : y + uy * (radius + 16);
+      grow(px - width / 2, py - 9);
+      grow(px + width / 2, py + 9);
+      pointerSvg = `
+        <g class="tree-pointer ${state}">
+          <title>${escapeHtml(text)}</title>
+          <rect x="${px - width / 2}" y="${py - 8.5}" width="${width}" height="17" rx="8.5" />
+          <text x="${px}" y="${py + 4}">${escapeHtml(shown)}</text>
+        </g>`;
+    }
+    const ring = marks.queued.has(node.key) || node.key === nextKey
+      ? `<circle class="tree-queue-ring${node.key === nextKey ? " next" : ""}" cx="${x}" cy="${y}" r="${radius + 5}" />`
+      : "";
+    return `
+      ${ring}
+      <g class="${classes}">
+        <title>${escapeHtml(node.label)}</title>
+        <circle cx="${x}" cy="${y}" r="${radius}" />
+        <text x="${x}" y="${y + 4.5}">${escapeHtml(shownLabel)}</text>
+      </g>
+      ${pointerSvg}`;
+  }).join("");
+
+  const pad = 14;
+  const width = bounds.maxX - bounds.minX + pad * 2;
+  const height = bounds.maxY - bounds.minY + pad * 2;
+  const arrow = (id) => `<marker id="${id}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" /></marker>`;
+  return `
+    <svg class="tree-svg graph-svg" viewBox="${bounds.minX - pad} ${bounds.minY - pad} ${width} ${height}" data-base-width="${width}" data-base-height="${height}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Graph diagram">
+      <defs>${arrow("graph-arrow")}${arrow("graph-arrow-active")}</defs>
+      ${edgeSvg}
+      ${nodeSvg}
+    </svg>`;
+}
+
+function renderGraphAdjacency(graph, pointers, marks, repr) {
+  const { current, neighbors, isFocusEdge } = graphFocus(graph, pointers);
+  const nodeLabel = (key) => graph.nodes.find((node) => node.key === key)?.label ?? "?";
+
+  let body;
+  if (repr === "matrix") {
+    const header = graph.nodes.map((node) =>
+      `<th class="${neighbors.has(node.key) || current.has(node.key) ? "active" : ""}" title="${escapeHtml(node.label)}">${escapeHtml(node.label)}</th>`).join("");
+    const rows = graph.nodes.map((rowNode) => {
+      const edges = graph.adjacency.get(rowNode.key) || [];
+      const cells = graph.nodes.map((colNode) => {
+        const edge = edges.find((candidate) => candidate.to === colNode.key);
+        const value = edge ? (edge.weight ?? 1) : 0;
+        const classes = [
+          edge ? "on" : "",
+          current.has(rowNode.key) ? "cross" : "",
+          edge && current.has(rowNode.key) && neighbors.has(colNode.key) ? "hit" : ""
+        ].filter(Boolean).join(" ");
+        return `<td class="${classes}">${escapeHtml(value)}</td>`;
+      }).join("");
+      return `<tr><th class="${current.has(rowNode.key) ? "active" : ""}" title="${escapeHtml(rowNode.label)}">${escapeHtml(rowNode.label)}</th>${cells}</tr>`;
+    }).join("");
+    const caption = graph.directed ? "row = from, column = to" : "undirected, so the matrix is symmetric";
+    body = `
+      <div class="graph-matrix-wrap">
+        <table class="graph-matrix"><thead><tr><th class="corner"></th>${header}</tr></thead><tbody>${rows}</tbody></table>
+      </div>
+      <p class="graph-caption">${caption}</p>`;
+  } else {
+    body = `<div class="graph-adj-list">${graph.nodes.map((node) => {
+      const edges = graph.adjacency.get(node.key) || [];
+      const rowActive = current.has(node.key);
+      const cells = edges.length
+        ? edges.map((edge) => {
+            const classes = [
+              "graph-adj-cell",
+              rowActive && isFocusEdge(node.key, edge.to) ? "active" : "",
+              marks.visited.has(edge.to) ? "visited" : ""
+            ].filter(Boolean).join(" ");
+            const weight = edge.weight !== null ? `<span class="graph-adj-weight">${escapeHtml(edge.weight)}</span>` : "";
+            return `<span class="${classes}">${escapeHtml(nodeLabel(edge.to))}${weight}</span>`;
+          }).join("")
+        : `<span class="graph-adj-empty">[ ]</span>`;
+      const rowClasses = ["graph-adj-row", rowActive ? "active" : "", marks.visited.has(node.key) ? "visited" : ""].filter(Boolean).join(" ");
+      return `
+        <div class="${rowClasses}">
+          <span class="graph-adj-node">${escapeHtml(node.label)}</span>
+          <span class="graph-adj-arrow">→</span>
+          <div class="graph-adj-cells">${cells}</div>
+        </div>`;
+    }).join("")}</div>`;
+  }
+
+  tutorGraphAdjacency.hidden = false;
+  tutorGraphAdjacency.innerHTML = body;
+}
+
+function renderTutorGraph(frames, heap, labels) {
+  const tab = getActiveTab();
+  const graphs = findGraphs(frames, heap, labels);
+  if (!graphs.length) {
+    tutorGraphLegend.innerHTML = "";
+    tutorGraphAdjacency.hidden = true;
+    tutorGraphSearch.hidden = true;
+    if (graphZoomBar) graphZoomBar.hidden = true;
+    tutorGraphCanvas.innerHTML = `<p class="tutor-empty">No graph in memory at this step. Graphs are detected from an adjacency list like <code>graph = {"A": ["B", "C"]}</code> (weighted: <code>{"A": {"B": 4}}</code> or <code>[("B", 4)]</code>), a list of neighbor lists like <code>adj = [[1, 2], [0]]</code>, an adjacency <code>matrix</code>, an <code>edges</code> list of pairs, or node objects with a <code>neighbors</code> list.</p>`;
+    return;
+  }
+
+  const graph = graphs.find((option) => option.name === tab?.graphSource) || graphs[0];
+  const pointers = collectGraphPointers(frames, graph, heap);
+  const marks = collectGraphMarks(frames, graph, heap);
+  const edgeCount = graphEdgeList(graph).length;
+  const repr = GRAPH_REPRS[tab?.graphRepr] ? tab.graphRepr : graph.native;
+  const searchMode = graphSearchModeFor(tab);
+  const search = collectSearchState(frames, graph, heap, marks, searchMode);
+  renderGraphLegend(frames, graphs, graph, marks, edgeCount, repr, searchMode);
+  tutorGraphCanvas.innerHTML = renderGraphSvg(graph, pointers, marks, search.next?.key);
+  applyGraphZoom(tab);
+  renderGraphSearch(search);
+  renderGraphAdjacency(graph, pointers, marks, repr);
+}
+
+const TUTOR_VIEWS = ["memory", "tree", "graph"];
+
 function applyTutorView(tab) {
-  const showTree = tab?.tutorView === "tree";
-  tutorTreeView.hidden = !showTree;
-  tutorMemoryLayout.hidden = showTree;
-  tutorMemoryViewButton.classList.toggle("active", !showTree);
-  tutorTreeViewButton.classList.toggle("active", showTree);
-  tutorMemoryViewButton.setAttribute("aria-selected", String(!showTree));
-  tutorTreeViewButton.setAttribute("aria-selected", String(showTree));
+  const view = TUTOR_VIEWS.includes(tab?.tutorView) ? tab.tutorView : "memory";
+  tutorMemoryLayout.hidden = view !== "memory";
+  tutorTreeView.hidden = view !== "tree";
+  tutorGraphView.hidden = view !== "graph";
+  [[tutorMemoryViewButton, "memory"], [tutorTreeViewButton, "tree"], [tutorGraphViewButton, "graph"]].forEach(([button, option]) => {
+    button.classList.toggle("active", view === option);
+    button.setAttribute("aria-selected", String(view === option));
+  });
 }
 
 function setTutorView(view) {
@@ -890,7 +1671,11 @@ function createTab(initialCode = null) {
     tutorStepIndex: 0,
     tutorStatus: "",
     tutorView: "memory",
-    traversalMode: "queue"
+    traversalMode: "queue",
+    graphRepr: null,
+    graphSource: null,
+    graphSearch: "bfs",
+    graphZoom: GRAPH_ZOOM_DEFAULT
   };
   tabs.push(newTab);
   switchTab(newTab.id);
@@ -1062,6 +1847,8 @@ function showTutorStep(index) {
   const { labels, names } = buildHeapLabels(step.frames, step.heap);
   if (tab.tutorView === "tree") {
     renderTutorTree(step.frames, step.heap, labels);
+  } else if (tab.tutorView === "graph") {
+    renderTutorGraph(step.frames, step.heap, labels);
   } else {
     renderTutorFrames(step.frames, step.heap, labels, names);
     renderTutorHeap(step.heap, labels);
@@ -1254,6 +2041,39 @@ tutorSlider.addEventListener("input", () => {
 
 tutorMemoryViewButton.addEventListener("click", () => setTutorView("memory"));
 tutorTreeViewButton.addEventListener("click", () => setTutorView("tree"));
+  tutorGraphViewButton.addEventListener("click", () => setTutorView("graph"));
+
+graphZoomOutButton.addEventListener("click", () => bumpGraphZoom(-GRAPH_ZOOM_STEP));
+graphZoomInButton.addEventListener("click", () => bumpGraphZoom(GRAPH_ZOOM_STEP));
+graphZoomInput.addEventListener("change", () => setGraphZoom(graphZoomInput.value));
+graphZoomInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    setGraphZoom(graphZoomInput.value);
+    graphZoomInput.blur();
+  }
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    bumpGraphZoom(GRAPH_ZOOM_STEP);
+  }
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    bumpGraphZoom(-GRAPH_ZOOM_STEP);
+  }
+});
+
+tutorGraphView.addEventListener("click", (event) => {
+  const tab = getActiveTab();
+  if (!tab) return;
+  const reprButton = event.target.closest("[data-graph-repr]");
+  const sourceButton = event.target.closest("[data-graph-source]");
+  const searchButton = event.target.closest("[data-graph-search]");
+  if (reprButton) tab.graphRepr = reprButton.dataset.graphRepr;
+  else if (sourceButton) tab.graphSource = sourceButton.dataset.graphSource;
+  else if (searchButton) tab.graphSearch = searchButton.dataset.graphSearch;
+  else return;
+  if (tab.tutorActive) showTutorStep(tab.tutorStepIndex);
+});
 
 tutorTreeQueues.addEventListener("click", (event) => {
   const button = event.target.closest("[data-traversal-mode]");
