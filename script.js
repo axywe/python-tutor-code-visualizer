@@ -21,6 +21,9 @@ const tutorNext = document.querySelector("#tutorNextButton");
 const tutorNextIter = document.querySelector("#tutorNextIterationButton");
 const tutorFirst = document.querySelector("#tutorFirstButton");
 const tutorLast = document.querySelector("#tutorLastButton");
+const tutorMethodJump = document.querySelector("#tutorMethodJump");
+const tutorMethodSelect = document.querySelector("#tutorMethodSelect");
+const tutorSkipMethod = document.querySelector("#tutorSkipMethodButton");
 const tutorFrames = document.querySelector("#tutorFrames");
 const tutorHeap = document.querySelector("#tutorHeap");
 const tutorMemoryLayout = document.querySelector("#tutorMemoryLayout");
@@ -154,9 +157,23 @@ def _loop_headers(source):
             headers.add(node.lineno)
     return headers
 
+def _defined_functions(source):
+    names = []
+    seen = set()
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return names
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name not in seen:
+            seen.add(node.name)
+            names.append(node.name)
+    return names
+
 def tutor_trace(source):
     steps = []
     headers = _loop_headers(source)
+    methods = _defined_functions(source)
     stdout = io.StringIO()
     truncated = False
     error = None
@@ -170,11 +187,13 @@ def tutor_trace(source):
                 "event": "exception",
                 "stdout": "",
                 "is_loop_header": False,
+                "function": None,
                 "frames": [{"name": "Global frame", "locals": {}}],
                 "heap": {},
                 "error": f"SyntaxError: {exc.msg}"
             }],
             "loop_headers": sorted(headers),
+            "methods": methods,
             "truncated": False
         }
 
@@ -188,11 +207,13 @@ def tutor_trace(source):
             truncated = True
             raise RuntimeError("Stopped after too many steps")
         frames, heap = _capture_state(frame)
+        fn_name = frame.f_code.co_name
         steps.append({
             "line": frame.f_lineno,
             "event": "line",
             "stdout": stdout.getvalue(),
             "is_loop_header": frame.f_lineno in headers,
+            "function": None if fn_name == "<module>" else fn_name,
             "frames": frames,
             "heap": heap,
             "error": None
@@ -225,6 +246,7 @@ def tutor_trace(source):
                 "event": "exception",
                 "stdout": stdout.getvalue(),
                 "is_loop_header": False,
+                "function": steps[-1].get("function") if steps else None,
                 "frames": frames if frames else [{"name": "Global frame", "locals": {}}],
                 "heap": heap,
                 "error": error
@@ -247,6 +269,7 @@ def tutor_trace(source):
             "event": "finished",
             "stdout": stdout.getvalue(),
             "is_loop_header": False,
+            "function": None,
             "frames": [{"name": "Global frame", "locals": final_locals}],
             "heap": final_heap,
             "error": None
@@ -258,6 +281,7 @@ def tutor_trace(source):
             "event": "finished",
             "stdout": stdout.getvalue(),
             "is_loop_header": False,
+            "function": None,
             "frames": [{"name": "Global frame", "locals": {}}],
             "heap": {},
             "error": None
@@ -266,6 +290,7 @@ def tutor_trace(source):
     return {
         "steps": steps,
         "loop_headers": sorted(headers),
+        "methods": methods,
         "truncated": truncated
     }
 `;
@@ -1670,6 +1695,7 @@ function createTab(initialCode = null) {
     tutorSteps: [],
     tutorStepIndex: 0,
     tutorStatus: "",
+    tutorMethods: [],
     tutorView: "memory",
     traversalMode: "queue",
     graphRepr: null,
@@ -1777,6 +1803,7 @@ function exitTutorMode(clearConsole = true) {
   tab.tutorSteps = [];
   tab.tutorStepIndex = 0;
   tab.tutorStatus = "";
+  tab.tutorMethods = [];
   if (clearConsole) {
     tab.consoleOutput = "Run or Visualize to see output...";
   }
@@ -1786,6 +1813,52 @@ function exitTutorMode(clearConsole = true) {
 // ---------------------------------------------------------------------------
 // Stepper Controls
 // ---------------------------------------------------------------------------
+
+function stepFunctionName(step) {
+  if (!step) return null;
+  if (step.function) return step.function;
+  const frames = step.frames || [];
+  if (!frames.length) return null;
+  const label = frames[frames.length - 1].name;
+  if (!label || label === "Global frame" || !label.endsWith("()")) return null;
+  return label.slice(0, -2);
+}
+
+function isMethodEntry(steps, index, methodName) {
+  const step = steps[index];
+  if (stepFunctionName(step) !== methodName) return false;
+  if (index === 0) return true;
+  const prev = steps[index - 1];
+  const prevName = stepFunctionName(prev);
+  const prevDepth = (prev.frames || []).length;
+  const depth = (step.frames || []).length;
+  return prevName !== methodName || depth > prevDepth;
+}
+
+function findNextMethodEntryIndex(tab, methodName) {
+  if (!tab || !methodName || !tab.tutorSteps?.length) return -1;
+  for (let index = tab.tutorStepIndex + 1; index < tab.tutorSteps.length; index++) {
+    if (isMethodEntry(tab.tutorSteps, index, methodName)) return index;
+  }
+  return -1;
+}
+
+function populateMethodSelect(tab) {
+  const methods = tab?.tutorMethods || [];
+  const previous = tutorMethodSelect.value;
+  if (!methods.length) {
+    tutorMethodJump.hidden = true;
+    tutorMethodSelect.innerHTML = "";
+    return;
+  }
+  tutorMethodJump.hidden = false;
+  tutorMethodSelect.innerHTML = methods
+    .map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}()</option>`)
+    .join("");
+  if (methods.includes(previous)) {
+    tutorMethodSelect.value = previous;
+  }
+}
 
 function findNextLoopIterationIndex(tab) {
   if (!tab || !tab.tutorSteps?.length) return -1;
@@ -1827,6 +1900,11 @@ function updateTutorControls(tab) {
   const nextIter = findNextLoopIterationIndex(tab);
   tutorNextIter.disabled = nextIter < 0;
   tutorNextIter.dataset.target = String(nextIter);
+
+  populateMethodSelect(tab);
+  const nextMethod = findNextMethodEntryIndex(tab, tutorMethodSelect.value);
+  tutorSkipMethod.disabled = nextMethod < 0;
+  tutorSkipMethod.dataset.target = String(nextMethod);
 }
 
 function showTutorStep(index) {
@@ -1931,6 +2009,7 @@ async function visualizeScratchCode() {
     }
     tab.tutorActive = true;
     tab.tutorStepIndex = 0;
+    tab.tutorMethods = data.methods || [];
     syncTabToUI(tab);
     if (data.truncated) {
       tutorStatus.textContent = `Stopped after ${tab.tutorSteps.length} steps to keep the browser responsive.`;
@@ -2033,6 +2112,22 @@ tutorLast.addEventListener("click", () => {
 tutorNextIter.addEventListener("click", () => {
   const target = Number(tutorNextIter.dataset.target);
   if (target >= 0) showTutorStep(target);
+});
+
+tutorMethodSelect.addEventListener("change", () => {
+  const tab = getActiveTab();
+  if (tab) updateTutorControls(tab);
+});
+
+tutorSkipMethod.addEventListener("click", () => {
+  const tab = getActiveTab();
+  const target = Number(tutorSkipMethod.dataset.target);
+  if (!tab || target < 0) return;
+  showTutorStep(target);
+  const name = tutorMethodSelect.value;
+  if (name) {
+    tutorStatus.textContent = `Skipped to ${name}().`;
+  }
 });
 
 tutorSlider.addEventListener("input", () => {

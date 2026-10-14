@@ -15,6 +15,7 @@ A browser-based, interactive Python execution and memory visualizer inspired by 
 - **Interactive Execution Stepper**:
   - **`Next line →`** & **`← Previous`**: Step statement by statement through code execution.
   - **`Next loop iteration ⟳`**: Jump directly to the next pass of the current loop.
+  - **`Skip to method`**: Jump directly to the next time a chosen `def` method or function starts running.
   - **`First`** & **`Last`**: Instantly jump to the start or end of execution.
   - **Scrubber Slider**: Scrub to any execution step.
 - **Memory Visualizer**:
@@ -166,6 +167,7 @@ Then open the URL printed in the terminal (usually `http://localhost:3000`).
    - Click **`Visualize`** to construct an execution trace.
    - Use **`Next line →`** to step statement by statement.
    - Use **`Next loop iteration ⟳`** to advance through loops without clicking through every internal line.
+   - Use **`Skip to method`** to jump to the next time a selected function or method runs.
    - Watch local variables update in the **Frames** panel and data structures update in the **Objects** panel.
    - Click **`Edit code`** anytime to exit visualizer mode and edit your script.
 4. **Work with Multiple Files**:
