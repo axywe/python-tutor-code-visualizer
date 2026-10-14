@@ -38,6 +38,70 @@ python --version
 
 ---
 
+## Install Git, Clone, and Pull Updates
+
+Use Git to download this project and pick up new changes later.
+
+### 1. Install Git
+
+**Windows:**
+1. Download the installer from [https://git-scm.com/download/win](https://git-scm.com/download/win).
+2. Run it and accept the default options.
+3. Close and reopen your terminal, then verify:
+
+   ```powershell
+   git --version
+   ```
+
+**macOS:**
+
+```bash
+git --version
+```
+
+If macOS prompts you to install developer tools, accept that. Or, if you use Homebrew:
+
+```bash
+brew install git
+```
+
+**Linux (Debian / Ubuntu):**
+
+```bash
+sudo apt update
+sudo apt install git
+git --version
+```
+
+### 2. Clone the repository
+
+```bash
+git clone https://github.com/mayfirestories/python-tutor-code-visualizer.git
+cd python-tutor-code-visualizer
+```
+
+Then follow **How to Setup and Run Locally** below, using this folder instead of `python_tutor` if you cloned from GitHub.
+
+### 3. Pull whenever there are changes
+
+From the project folder:
+
+```bash
+git pull
+```
+
+### 4. Hard refresh the browser after a pull
+
+Your browser may keep an old copy of `script.js` or `style.css`. After pulling new code, do an empty-cache hard reload:
+
+1. Open DevTools with `F12` (or `Ctrl + Shift + I` / `Cmd + Option + I` on Mac).
+2. **Right-click** the browser's refresh button (next to the address bar).
+3. Choose **Empty cache and hard reload**.
+
+DevTools must stay open for that refresh menu to appear.
+
+---
+
 ## How to Setup and Run Locally
 
 ### Option 1: Using Python's Built-in HTTP Server (Recommended)
