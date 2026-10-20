@@ -2089,6 +2089,503 @@ function renderPathState(state, graph) {
   `;
 }
 
+const GRID_EFFORT_PATTERN = /^(effort|efforts|dist|dists|distance|distances|cost|costs|best|dp|memo)$/i;
+const GRID_WEIGHT_PATTERN = /^(heights|height|grid|board|maze|weights|weight|terrain|elevation|elevations|field)$/i;
+const GRID_DIRECTION_PATTERN = /^(directions|direction|dirs|deltas|delta|moves|offsets|offset)$/i;
+
+function sameShape(a, b) {
+  return Boolean(a && b && a.rows === b.rows && a.cols === b.cols);
+}
+
+function readNumericGrid(name, encoded, heap) {
+  if (PATH_FRONTIER_NAMES.includes(String(name).toLowerCase())) return null;
+  if (GRID_DIRECTION_PATTERN.test(name)) return null;
+  if (encoded?.kind !== "ref") return null;
+  const object = heap[encoded.id];
+  if (!object?.elements?.length) return null;
+  if (object.type !== "list" && object.type !== "tuple") return null;
+  const rowObjects = object.elements.map((item) => (item?.kind === "ref" ? heap[item.id] : null));
+  if (rowObjects.some((row) => !row?.elements?.length)) return null;
+  if (rowObjects.some((row) => row.type !== "list" && row.type !== "tuple")) return null;
+  const cols = rowObjects[0].elements.length;
+  if (rowObjects.some((row) => row.elements.length !== cols)) return null;
+  if (!rowObjects.every((row) => row.elements.every((cell) => isNumericPrimitive(cell)))) return null;
+  const named = GRID_EFFORT_PATTERN.test(name) || GRID_WEIGHT_PATTERN.test(name);
+  const tupleRows = rowObjects.every((row) => row.type === "tuple");
+  if (tupleRows && cols <= 3 && !named) return null;
+  const cells = rowObjects.map((row) => row.elements.map((cell) => cell.value));
+  const tinySteps = cols === 2
+    && cells.length <= 8
+    && cells.flat().every((value) => ["-1", "0", "1", "-1.0", "0.0", "1.0"].includes(value));
+  if (tinySteps && !named) return null;
+  if (!named && (cells.length < 2 || cols < 2)) return null;
+  return { rows: cells.length, cols, cells };
+}
+
+function gridLocals(frames) {
+  const locals = [];
+  const seen = new Set();
+  [...(frames || [])].reverse().forEach((frame) => {
+    Object.entries(frame.locals || {}).forEach(([name, value]) => {
+      if (seen.has(name)) return;
+      seen.add(name);
+      locals.push({ name, value });
+    });
+  });
+  return locals;
+}
+
+function readIntLocal(locals, names) {
+  for (const name of names) {
+    const found = locals.find((row) => row.name === name);
+    if (!found || !isNumericPrimitive(found.value)) continue;
+    const n = Number(found.value.value);
+    if (Number.isInteger(n)) return n;
+  }
+  return null;
+}
+
+function readNumberLocal(locals, names) {
+  for (const name of names) {
+    const found = locals.find((row) => row.name === name);
+    if (!found || !isNumericPrimitive(found.value)) continue;
+    return found.value.value;
+  }
+  return null;
+}
+
+function previewSequence(object, heap) {
+  const shown = object.elements.slice(0, 6).map((item) => {
+    if (isNumericPrimitive(item)) return item.value;
+    const nested = item?.kind === "ref" ? heap[item.id] : null;
+    if (nested?.elements?.length === 2 && nested.elements.every((part) => isNumericPrimitive(part))) {
+      return `(${nested.elements[0].value},${nested.elements[1].value})`;
+    }
+    return "…";
+  });
+  return shown.join("→") + (object.elements.length > 6 ? "…" : "");
+}
+
+function describeTuplePart(encoded, heap) {
+  if (isNumericPrimitive(encoded)) return { kind: "num", n: Number(encoded.value), text: encoded.value };
+  if (encoded?.kind !== "ref") return { kind: "other" };
+  const object = heap[encoded.id];
+  if (!object?.elements) return { kind: "other" };
+  if (object.elements.length === 2 && object.elements.every((part) => isNumericPrimitive(part))) {
+    return {
+      kind: "pair",
+      row: Number(object.elements[0].value),
+      col: Number(object.elements[1].value),
+      text: `(${object.elements[0].value}, ${object.elements[1].value})`
+    };
+  }
+  return { kind: "seq", text: previewSequence(object, heap) };
+}
+
+function tupleParts(encoded, heap) {
+  if (encoded?.kind !== "ref") return null;
+  const object = heap[encoded.id];
+  if (!object?.elements?.length) return null;
+  if (object.type !== "tuple" && object.type !== "list") return null;
+  return object.elements.map((item) => describeTuplePart(item, heap));
+}
+
+function buildGridEntries(partsList, roles) {
+  const entries = [];
+  for (const parts of partsList) {
+    let row = null;
+    let col = null;
+    let cost = null;
+    const slots = parts.map((part, index) => {
+      const role = roles[index];
+      if (role === "row") row = part.n;
+      if (role === "col") col = part.n;
+      if (role === "cell") {
+        row = part.row;
+        col = part.col;
+      }
+      if (role === "cost") cost = part.text;
+      const text = part.kind === "pair" ? `(${part.row}, ${part.col})` : part.text;
+      return { role, text };
+    });
+    if (row == null || col == null) return null;
+    entries.push({ slots, row, col, cost, stale: false });
+  }
+  return entries;
+}
+
+function shapePreference(rowPos, colPos, costPos) {
+  if (costPos === 0 && rowPos === 1 && colPos === 2) return 0;
+  if (rowPos === 0 && colPos === 1 && (costPos === 2 || costPos == null)) return 1;
+  if (costPos === 0) return 2;
+  return 3 + rowPos + colPos;
+}
+
+function scoreGridRoles(partsList, roles, effortCells) {
+  if (!effortCells) return 0;
+  let score = 0;
+  for (const parts of partsList) {
+    let row = null;
+    let col = null;
+    let cost = null;
+    parts.forEach((part, index) => {
+      const role = roles[index];
+      if (role === "row") row = part.n;
+      if (role === "col") col = part.n;
+      if (role === "cell") {
+        row = part.row;
+        col = part.col;
+      }
+      if (role === "cost") cost = part.text;
+    });
+    if (row == null || col == null || cost == null) continue;
+    const have = effortCells[row]?.[col];
+    if (have != null && Number(have) === Number(cost)) score += 2;
+  }
+  return score;
+}
+
+function chooseCostPos(rest, rowPos, colPos, partsList, effortCells) {
+  if (!rest.length) return null;
+  if (!effortCells || rest.length === 1) return rest[0];
+  let best = rest[0];
+  let bestScore = -1;
+  rest.forEach((pos) => {
+    let score = 0;
+    partsList.forEach((parts) => {
+      const have = effortCells[parts[rowPos].n]?.[parts[colPos].n];
+      if (have != null && Number(have) === Number(parts[pos].text)) score += 1;
+    });
+    if (score > bestScore) {
+      bestScore = score;
+      best = pos;
+    }
+  });
+  return best;
+}
+
+function classifyGridTuples(partsList, grid, effortCells) {
+  if (!partsList.length) return null;
+  const width = partsList[0].length;
+  if (!width || partsList.some((parts) => parts.length !== width)) return null;
+  if (partsList.some((parts, index) => parts.some((part, slot) => part.kind !== partsList[0][slot].kind))) return null;
+  const kinds = partsList[0].map((part) => part.kind);
+  if (kinds.some((kind) => kind === "other")) return null;
+
+  const inRow = (n) => Number.isInteger(n) && n >= 0 && n < grid.rows;
+  const inCol = (n) => Number.isInteger(n) && n >= 0 && n < grid.cols;
+  const numericIdx = kinds.map((kind, index) => (kind === "num" ? index : -1)).filter((index) => index >= 0);
+  const pairIdx = kinds.map((kind, index) => (kind === "pair" ? index : -1)).filter((index) => index >= 0);
+  const blankRoles = () => kinds.map((kind) => (kind === "seq" ? "path" : "extra"));
+
+  if (pairIdx.length > 1) return null;
+  if (pairIdx.length === 1) {
+    const cellPos = pairIdx[0];
+    if (!partsList.every((parts) => inRow(parts[cellPos].row) && inCol(parts[cellPos].col))) return null;
+    const roles = blankRoles();
+    roles[cellPos] = "cell";
+    if (numericIdx.length) roles[numericIdx[0]] = "cost";
+    const entries = buildGridEntries(partsList, roles);
+    return entries ? { roles, entries } : null;
+  }
+
+  if (kinds.some((kind) => kind === "seq") && numericIdx.length < 3) return null;
+  if (numericIdx.length < 2) return null;
+
+  let best = null;
+  numericIdx.forEach((rowPos) => {
+    numericIdx.forEach((colPos) => {
+      if (rowPos === colPos) return;
+      if (!partsList.every((parts) => inRow(parts[rowPos].n) && inCol(parts[colPos].n))) return;
+      const rest = numericIdx.filter((index) => index !== rowPos && index !== colPos);
+      const costPos = chooseCostPos(rest, rowPos, colPos, partsList, effortCells);
+      const roles = blankRoles();
+      roles[rowPos] = "row";
+      roles[colPos] = "col";
+      if (costPos != null) roles[costPos] = "cost";
+      const score = scoreGridRoles(partsList, roles, effortCells);
+      const preference = shapePreference(rowPos, colPos, costPos);
+      if (!best || score > best.score || (score === best.score && preference < best.preference)) {
+        best = { roles, score, preference };
+      }
+    });
+  });
+  if (!best) return null;
+  const entries = buildGridEntries(partsList, best.roles);
+  return entries ? { roles: best.roles, entries } : null;
+}
+
+function parseGridFrontier(encoded, heap, grid, effortCells) {
+  if (encoded?.kind !== "ref") return null;
+  const object = heap[encoded.id];
+  if (!object?.elements) return null;
+  if (object.type !== "list" && object.type !== "tuple" && object.type !== "deque") return null;
+  if (!object.elements.length) return { entries: [], roles: null };
+  const partsList = [];
+  for (const item of object.elements) {
+    const parts = tupleParts(item, heap);
+    if (!parts) return null;
+    partsList.push(parts);
+  }
+  return classifyGridTuples(partsList, grid, effortCells);
+}
+
+function matrixRank(matrix) {
+  if (GRID_EFFORT_PATTERN.test(matrix.name)) return 0;
+  if (GRID_WEIGHT_PATTERN.test(matrix.name)) return 1;
+  return 2;
+}
+
+function findCoordinateFrontier(locals, heap, matrices, effort) {
+  const ordered = [...matrices].sort((a, b) => matrixRank(a) - matrixRank(b));
+  let empty = null;
+  for (const wanted of PATH_FRONTIER_NAMES) {
+    const local = locals.find((row) => row.name.toLowerCase() === wanted);
+    if (!local) continue;
+    for (const grid of ordered) {
+      const effortCells = effort && sameShape(effort, grid) ? effort.cells : null;
+      const parsed = parseGridFrontier(local.value, heap, grid, effortCells);
+      if (!parsed) continue;
+      if (!parsed.entries.length) {
+        if (!empty) empty = { name: local.name, grid, parsed };
+        break;
+      }
+      const nextIndex = /stack|dfs/i.test(local.name) ? parsed.entries.length - 1 : 0;
+      return { name: local.name, grid, parsed: { ...parsed, nextIndex } };
+    }
+  }
+  if (!empty) return null;
+  return { name: empty.name, grid: empty.grid, parsed: { ...empty.parsed, nextIndex: -1 } };
+}
+
+function markStaleEntries(entries, effort) {
+  if (!effort) return;
+  entries.forEach((entry) => {
+    const have = effort.cells[entry.row]?.[entry.col];
+    entry.stale = entry.cost != null && have != null && Number.isFinite(Number(have)) && Number(entry.cost) > Number(have);
+  });
+}
+
+function cellInGrid(locals, rowNames, colNames, grid) {
+  const row = readIntLocal(locals, rowNames);
+  const col = readIntLocal(locals, colNames);
+  if (row == null || col == null) return null;
+  if (row < 0 || col < 0 || row >= grid.rows || col >= grid.cols) return null;
+  return { row, col };
+}
+
+function collectGridPath(frames, heap) {
+  const locals = gridLocals(frames);
+  const matrices = [];
+  locals.forEach(({ name, value }) => {
+    const grid = readNumericGrid(name, value, heap);
+    if (grid) matrices.push({ name, ...grid });
+  });
+  if (!matrices.length) return null;
+
+  const effort = matrices.find((matrix) => GRID_EFFORT_PATTERN.test(matrix.name)) || null;
+  const weight = matrices.find((matrix) => GRID_WEIGHT_PATTERN.test(matrix.name)) || null;
+  const frontierHit = findCoordinateFrontier(locals, heap, matrices, effort);
+  const blockedByOtherHeap = !frontierHit && locals.some((local) => {
+    if (!PATH_FRONTIER_NAMES.includes(local.name.toLowerCase()) || local.value?.kind !== "ref") return false;
+    const object = heap[local.value.id];
+    return object?.elements?.length && (object.type === "list" || object.type === "tuple" || object.type === "deque");
+  });
+  if (blockedByOtherHeap) return null;
+  if (!frontierHit && !effort && !weight) return null;
+
+  const anchor = frontierHit?.grid || effort || weight;
+  const shown = effort && sameShape(effort, anchor) ? effort : anchor;
+  const terrain = weight && weight !== shown && sameShape(weight, shown) ? weight : null;
+  const frontier = frontierHit && sameShape(frontierHit.grid, shown) ? { name: frontierHit.name, ...frontierHit.parsed } : null;
+  if (frontier?.entries && effort && sameShape(effort, shown)) markStaleEntries(frontier.entries, effort);
+
+  return {
+    shown,
+    terrain,
+    effortName: effort?.name || null,
+    frontier,
+    current: cellInGrid(locals, ["row", "r"], ["col", "c"], shown),
+    neighbor: cellInGrid(locals, ["new_row", "nr"], ["new_col", "nc"], shown),
+    currentEffort: readNumberLocal(locals, ["current_effort", "curr_effort"]),
+    jump: readNumberLocal(locals, ["jump"]),
+    newEffort: readNumberLocal(locals, ["new_effort", "new_cost", "new_dist"])
+  };
+}
+
+function finiteRange(cells) {
+  let min = Infinity;
+  let max = -Infinity;
+  let any = false;
+  cells.flat().forEach((value) => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return;
+    any = true;
+    if (n < min) min = n;
+    if (n > max) max = n;
+  });
+  return any ? { min, max } : null;
+}
+
+function effortTone(value, range) {
+  const n = Number(value);
+  if (!range || !Number.isFinite(n)) return "";
+  if (range.max === range.min) return "low";
+  const t = (n - range.min) / (range.max - range.min);
+  if (t <= 0.34) return "low";
+  if (t <= 0.67) return "mid";
+  return "high";
+}
+
+function heapMarks(frontier) {
+  const marks = new Map();
+  frontier?.entries?.forEach((entry, index) => {
+    const key = `${entry.row},${entry.col}`;
+    if (!marks.has(key)) marks.set(key, { entries: [], next: false });
+    const mark = marks.get(key);
+    mark.entries.push(entry);
+    if (index === frontier.nextIndex) mark.next = true;
+  });
+  return marks;
+}
+
+function heapBadge(mark) {
+  const costs = mark.entries.map((entry) => entry.cost).filter((cost) => cost != null);
+  if (!costs.length) return mark.entries.length > 1 ? `×${mark.entries.length}` : "heap";
+  const best = costs.reduce((left, right) => (Number(left) <= Number(right) ? left : right));
+  const count = mark.entries.length > 1 ? ` ×${mark.entries.length}` : "";
+  return `${formatPathCost(best)}${count}`;
+}
+
+function gridRoleLabel(role, scene) {
+  if (role === "cost") return scene.effortName || "cost";
+  if (role === "cell") return "(row, col)";
+  if (role === "path") return "path";
+  if (role === "extra") return "value";
+  return role;
+}
+
+function gridShapeSentence(scene) {
+  const roles = scene.frontier?.roles;
+  if (!scene.frontier) return "No heap in memory yet.";
+  if (!roles) return `${scene.frontier.name} is empty.`;
+  const parts = roles.map((role) => gridRoleLabel(role, scene));
+  return `${scene.frontier.name} tuples have ${roles.length} value${roles.length === 1 ? "" : "s"}: (${parts.join(", ")}).`;
+}
+
+function renderGridBoard(scene) {
+  const { shown, terrain } = scene;
+  const range = finiteRange(shown.cells);
+  const marks = heapMarks(scene.frontier);
+  const header = Array.from({ length: shown.cols }, (_, col) => `<div class="path-grid-index">${col}</div>`).join("");
+  const body = shown.cells.map((row, r) => {
+    const cells = row.map((raw, c) => {
+      const mark = marks.get(`${r},${c}`);
+      const classes = ["path-cell", effortTone(raw, range)];
+      if (scene.current && scene.current.row === r && scene.current.col === c) classes.push("current");
+      if (scene.neighbor && scene.neighbor.row === r && scene.neighbor.col === c) classes.push("checking");
+      if (mark) {
+        classes.push("queued");
+        if (mark.next) classes.push("next");
+        if (mark.entries.every((entry) => entry.stale)) classes.push("stale");
+      }
+      const weight = terrain
+        ? `<span class="path-cell-weight" title="${escapeAttr(terrain.name)}">${escapeHtml(formatPathCost(terrain.cells[r][c]))}</span>`
+        : "";
+      const badge = mark ? `<span class="path-cell-badge">${escapeHtml(heapBadge(mark))}</span>` : "";
+      const title = terrain
+        ? `(${r}, ${c}) ${terrain.name} ${formatPathCost(terrain.cells[r][c])}, ${shown.name} ${formatPathCost(raw)}`
+        : `(${r}, ${c}) ${shown.name} ${formatPathCost(raw)}`;
+      return `<div class="${classes.filter(Boolean).join(" ")}" title="${escapeAttr(title)}">${badge}${weight}<span class="path-cell-value">${escapeHtml(formatPathCost(raw))}</span></div>`;
+    }).join("");
+    return `<div class="path-grid-index">${r}</div>${cells}`;
+  }).join("");
+  return `<div class="path-grid-wrap"><div class="path-grid" style="--cols:${shown.cols}"><div class="path-grid-index"></div>${header}${body}</div></div>`;
+}
+
+function renderGridPathLegend(scene) {
+  const stale = scene.frontier?.entries?.some((entry) => entry.stale);
+  const stacked = scene.terrain
+    ? `<span class="tree-chip"><strong>${escapeHtml(scene.terrain.name)}</strong> above <strong>${escapeHtml(scene.shown.name)}</strong></span>`
+    : "";
+  tutorPathLegend.innerHTML = `
+    <div class="tree-legend-row">
+      <span class="tree-chip active"><strong>${escapeHtml(scene.shown.name)}</strong> ${scene.shown.rows}×${scene.shown.cols}</span>
+      ${stacked}
+    </div>
+    <div class="tree-legend-row">
+      <span class="tree-key"><span class="tree-swatch low"></span>Lower ${escapeHtml(scene.shown.name)}</span>
+      <span class="tree-key"><span class="tree-swatch high"></span>Higher</span>
+      <span class="tree-key"><span class="tree-swatch active"></span>Current cell</span>
+      <span class="tree-key"><span class="tree-swatch checking"></span>Neighbor being checked</span>
+      <span class="tree-key"><span class="tree-swatch heap"></span>In the heap, brighter is the next pop</span>
+    </div>
+    <p class="path-note">${escapeHtml(gridShapeSentence(scene))}${stale ? " Dimmed heap rows are already worse than the saved effort." : ""}</p>
+  `;
+}
+
+function renderGridPathState(scene) {
+  const chip = (text, extra = "") => `<span class="graph-search-chip${extra}">${escapeHtml(text)}</span>`;
+  const current = scene.current
+    ? chip(`(${scene.current.row}, ${scene.current.col})`, " current-cell")
+      + (scene.currentEffort != null ? chip(`effort ${formatPathCost(scene.currentEffort)}`) : "")
+    : `<span class="graph-search-empty">no cell popped yet</span>`;
+  const checkingBits = [];
+  if (scene.neighbor) checkingBits.push(chip(`(${scene.neighbor.row}, ${scene.neighbor.col})`, " checking-cell"));
+  if (scene.jump != null) checkingBits.push(chip(`jump ${formatPathCost(scene.jump)}`));
+  if (scene.newEffort != null) checkingBits.push(chip(`new ${formatPathCost(scene.newEffort)}`));
+  const checking = checkingBits.length
+    ? checkingBits.join("")
+    : `<span class="graph-search-empty">none</span>`;
+
+  let frontierBody = `<span class="graph-search-empty">none</span>`;
+  if (scene.frontier) {
+    if (!scene.frontier.entries.length) {
+      frontierBody = `<span class="graph-search-empty">empty</span>`;
+    } else {
+      const width = scene.frontier.roles.length;
+      const head = scene.frontier.roles.map((role) => `<span>${escapeHtml(gridRoleLabel(role, scene))}</span>`).join("");
+      const rows = scene.frontier.entries.map((entry, index) => {
+        const classes = [
+          "path-tuple-row",
+          index === scene.frontier.nextIndex ? "next" : "",
+          entry.stale ? "stale" : ""
+        ].filter(Boolean).join(" ");
+        const parts = entry.slots.map((slot) => {
+          const text = slot.role === "cost" ? formatPathCost(slot.text) : slot.text;
+          return `<span class="path-tuple-part${slot.role === "cost" ? " cost" : ""}">${escapeHtml(text)}</span>`;
+        }).join("");
+        return `<div class="${classes}" style="--n:${width}">${parts}</div>`;
+      }).join("");
+      frontierBody = `<div class="path-frontier"><div class="path-tuple-head" style="--n:${width}">${head}</div>${rows}</div>`;
+    }
+  }
+
+  const nextNote = scene.frontier?.nextIndex >= 0 ? " · next pop" : "";
+  tutorPathState.hidden = false;
+  tutorPathState.innerHTML = `
+    <div class="graph-search-block">
+      <div class="graph-search-label">Current cell</div>
+      <div class="graph-search-chips">${current}</div>
+    </div>
+    <div class="graph-search-block">
+      <div class="graph-search-label">Checking</div>
+      <div class="graph-search-chips">${checking}</div>
+    </div>
+    <div class="graph-search-block">
+      <div class="graph-search-label">${escapeHtml(scene.frontier?.name || "heap")}${nextNote}</div>
+      ${frontierBody}
+    </div>
+  `;
+}
+
+function renderGridPath(scene) {
+  if (pathZoomBar) pathZoomBar.hidden = true;
+  renderGridPathLegend(scene);
+  tutorPathCanvas.innerHTML = renderGridBoard(scene);
+  renderGridPathState(scene);
+}
+
 function renderPathLegend(graphs, graph, state) {
   const picker = graphs.length > 1
     ? `<div class="tree-legend-row"><span class="traversal-label">Graph</span>${graphs.map((option) => `
@@ -2106,13 +2603,19 @@ function renderPathLegend(graphs, graph, state) {
 }
 
 function renderTutorPath(frames, heap, labels) {
+  const gridScene = collectGridPath(frames, heap);
+  if (gridScene) {
+    renderGridPath(gridScene);
+    return;
+  }
+
   const tab = getActiveTab();
   const graphs = findGraphs(frames, heap, labels);
   if (!graphs.length) {
     tutorPathLegend.innerHTML = "";
     tutorPathState.hidden = true;
     if (pathZoomBar) pathZoomBar.hidden = true;
-    tutorPathCanvas.innerHTML = `<p class="tutor-empty">No graph in memory at this step. The Path tab reads a graph together with the variables that manage a route: a <code>path</code> list, a <code>parent</code> or <code>prev</code> map, a <code>dist</code> / <code>cost</code> / <code>effort</code> dict, or a heap of <code>(cost, node, path)</code>.</p>`;
+    tutorPathCanvas.innerHTML = `<p class="tutor-empty">No route in memory at this step. The Path tab reads a graph and the variables that manage a route, or a height / effort grid plus a heap. Tuple length decides the heap: two numbers are a cell, a nested pair is a cell, and three numbers are a cost plus a row and column.</p>`;
     return;
   }
 
