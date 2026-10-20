@@ -68,9 +68,15 @@
               <p id="tutorStatus" class="tutor-status" aria-live="polite"></p>
 
               <div class="tutor-navigation">
-                <button id="tutorPrevButton" type="button">← Previous</button>
+                <div class="tutor-nav-control">
+                  <span class="tutor-key-label" title="Press A for the previous line">A</span>
+                  <button id="tutorPrevButton" type="button" title="Previous line (A)">← Previous</button>
+                </div>
                 <input id="tutorStepSlider" type="range" min="0" max="0" value="0" aria-label="Execution step" />
-                <button id="tutorNextButton" class="primary-button" type="button">Next line →</button>
+                <div class="tutor-nav-control">
+                  <span class="tutor-key-label" title="Press D for the next line">D</span>
+                  <button id="tutorNextButton" class="primary-button" type="button" title="Next line (D)">Next line →</button>
+                </div>
               </div>
               <div class="tutor-actions">
                 <button id="tutorNextIterationButton" type="button" title="Jump to next iteration of current loop">Next loop iteration ⟳</button>
@@ -86,13 +92,14 @@
                 <button id="tutorMemoryViewButton" class="view-toggle-button active" type="button" role="tab" aria-selected="true">Variables</button>
                 <button id="tutorTreeViewButton" class="view-toggle-button" type="button" role="tab" aria-selected="false">Tree</button>
                 <button id="tutorGraphViewButton" class="view-toggle-button" type="button" role="tab" aria-selected="false">Graph</button>
+                <button id="tutorPathViewButton" class="view-toggle-button" type="button" role="tab" aria-selected="false">Path</button>
               </div>
 
               <section id="tutorGraphView" class="tutor-tree-view" hidden aria-label="Graph visualization">
                 <div id="tutorGraphLegend" class="tree-legend"></div>
                 <div class="graph-stage">
                   <div class="graph-canvas-wrap">
-                    <div class="graph-zoom" role="group" aria-label="Graph zoom">
+                    <div id="graphZoomBar" class="graph-zoom" role="group" aria-label="Graph zoom">
                       <button id="graphZoomOutButton" type="button" title="Zoom out" aria-label="Zoom out">−</button>
                       <input id="graphZoomInput" type="text" inputmode="numeric" value="100" aria-label="Zoom percent">
                       <span class="graph-zoom-suffix">%</span>
@@ -105,6 +112,22 @@
                 <div id="tutorGraphAdjacency" class="graph-adjacency" hidden></div>
               </section>
 
+              <section id="tutorPathView" class="tutor-tree-view" hidden aria-label="Path calculation">
+                <div id="tutorPathLegend" class="tree-legend"></div>
+                <div class="graph-stage path-stage">
+                  <div class="graph-canvas-wrap">
+                    <div id="pathZoomBar" class="graph-zoom" role="group" aria-label="Path zoom">
+                      <button id="pathZoomOutButton" type="button" title="Zoom out" aria-label="Zoom out">−</button>
+                      <input id="pathZoomInput" type="text" inputmode="numeric" value="100" aria-label="Zoom percent">
+                      <span class="graph-zoom-suffix">%</span>
+                      <button id="pathZoomInButton" type="button" title="Zoom in" aria-label="Zoom in">+</button>
+                    </div>
+                    <div id="tutorPathCanvas" class="tree-canvas"></div>
+                  </div>
+                  <aside id="tutorPathState" class="graph-search path-state" hidden aria-label="Path management"></aside>
+                </div>
+              </section>
+
               <section id="tutorTreeView" class="tutor-tree-view" hidden aria-label="Tree visualization">
                 <div id="tutorTreeLegend" class="tree-legend"></div>
                 <div id="tutorTreeCanvas" class="tree-canvas"></div>
@@ -112,6 +135,16 @@
               </section>
 
               <div id="tutorMemoryLayout" class="tutor-memory-layout">
+                <section id="tutorVarFocus" class="tutor-var-focus" hidden aria-label="Focused variable">
+                  <div class="tutor-var-focus-header">
+                    <div>
+                      <p id="tutorVarFocusKicker" class="tutor-var-focus-kicker"></p>
+                      <p id="tutorVarFocusTitle" class="tutor-var-focus-title"></p>
+                    </div>
+                    <button id="tutorVarFocusClose" class="tutor-var-focus-close" type="button" title="Back to all variables" aria-label="Back to all variables">×</button>
+                  </div>
+                  <div id="tutorVarFocusBody" class="tutor-var-focus-body"></div>
+                </section>
                 <section class="tutor-frames">
                   <h2>Frames</h2>
                   <div id="tutorFrames" class="tutor-frames-body"></div>

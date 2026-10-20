@@ -42,7 +42,21 @@ const tutorGraphViewButton = document.querySelector("#tutorGraphViewButton");
 const graphZoomOutButton = document.querySelector("#graphZoomOutButton");
 const graphZoomInButton = document.querySelector("#graphZoomInButton");
 const graphZoomInput = document.querySelector("#graphZoomInput");
-const graphZoomBar = document.querySelector(".graph-zoom");
+const graphZoomBar = document.querySelector("#graphZoomBar");
+const tutorPathView = document.querySelector("#tutorPathView");
+const tutorPathLegend = document.querySelector("#tutorPathLegend");
+const tutorPathCanvas = document.querySelector("#tutorPathCanvas");
+const tutorPathState = document.querySelector("#tutorPathState");
+const tutorPathViewButton = document.querySelector("#tutorPathViewButton");
+const pathZoomOutButton = document.querySelector("#pathZoomOutButton");
+const pathZoomInButton = document.querySelector("#pathZoomInButton");
+const pathZoomInput = document.querySelector("#pathZoomInput");
+const pathZoomBar = document.querySelector("#pathZoomBar");
+const tutorVarFocus = document.querySelector("#tutorVarFocus");
+const tutorVarFocusKicker = document.querySelector("#tutorVarFocusKicker");
+const tutorVarFocusTitle = document.querySelector("#tutorVarFocusTitle");
+const tutorVarFocusBody = document.querySelector("#tutorVarFocusBody");
+const tutorVarFocusClose = document.querySelector("#tutorVarFocusClose");
 
 const consoleHeading = document.querySelector("#consoleHeading");
 const scratchConsole = document.querySelector("#scratchConsole");
@@ -302,6 +316,10 @@ function escapeHtml(text) {
     .replaceAll(">", "&gt;");
 }
 
+function escapeAttr(text) {
+  return escapeHtml(text).replaceAll('"', "&quot;");
+}
+
 function highlightPython(source) {
   const escaped = escapeHtml(source);
   const pattern = /(#.*$)|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|\b(for|in|if|else|elif|while|def|return|break|continue|range|True|False|None|and|or|not)\b|\b(print)\b|(\b\d+(?:\.\d+)?\b)/gm;
@@ -423,12 +441,16 @@ function renderTutorFrames(frames, heap, labels, names) {
     const active = index === frames.length - 1 ? " active-frame" : "";
     const vars = Object.entries(frame.locals);
     const body = vars.length
-      ? vars.map(([name, value]) =>
-          `<div class="frame-var"><span class="frame-var-name">${escapeHtml(name)}</span><span class="frame-var-eq">=</span>${renderFrameValue(name, value, heap, labels, names)}</div>`
+      ? vars.map(([name]) =>
+          `<button class="frame-var" type="button" data-focus-frame="${index}" data-focus-name="${escapeAttr(name)}" title="Show only ${escapeAttr(name)}"><span class="frame-var-name">${escapeHtml(name)}</span><span class="frame-var-eq">=</span>${renderFrameValue(name, frame.locals[name], heap, labels, names)}</button>`
         ).join("")
       : `<p class="tutor-empty">Empty</p>`;
     return `<article class="frame-card${active}"><div class="frame-title">${escapeHtml(frame.name)}</div><div class="frame-vars">${body}</div></article>`;
   }).join("");
+}
+
+function focusSlotButton(label, part, parentId, index, inner) {
+  return `<button class="heap-slot" type="button" data-focus-parent="${escapeAttr(parentId)}" data-focus-part="${escapeAttr(part)}" data-focus-index="${escapeAttr(index)}" data-focus-label="${escapeAttr(label)}" title="Show only ${escapeAttr(label)}">${inner}</button>`;
 }
 
 function renderTutorHeap(heap, labels) {
@@ -438,24 +460,111 @@ function renderTutorHeap(heap, labels) {
     return;
   }
   tutorHeap.innerHTML = objects.map((object) => {
+    const label = labelForRef(object.id, heap, labels);
     let body = "";
     if (object.entries) {
-      body = object.entries.map(([key, value]) =>
-        `<div class="heap-dict-row">${renderEncodedInline(key, heap, labels)}<span class="heap-dict-arrow">→</span>${renderEncodedInline(value, heap, labels)}</div>`
-      ).join("");
+      body = object.entries.map(([key, value], index) => {
+        const keyText = key?.kind === "primitive" ? stripQuotes(key.value) : `key ${index}`;
+        const keyLabel = `${label} key ${keyText}`;
+        const valueLabel = `${label}[${keyText}]`;
+        return `<div class="heap-dict-row">${focusSlotButton(keyLabel, "entry-key", object.id, index, renderEncodedInline(key, heap, labels))}<span class="heap-dict-arrow">→</span>${focusSlotButton(valueLabel, "entry", object.id, index, renderEncodedInline(value, heap, labels))}</div>`;
+      }).join("");
     } else if (object.elements) {
-      body = object.elements.map((value, index) =>
-        `<div class="heap-row"><span class="heap-index">${index}</span>${renderEncodedInline(value, heap, labels)}</div>`
-      ).join("");
+      body = object.elements.map((value, index) => {
+        const slotLabel = `${label}[${index}]`;
+        return focusSlotButton(slotLabel, "element", object.id, index, `<span class="heap-index">${index}</span>${renderEncodedInline(value, heap, labels)}`).replace("heap-slot", "heap-row heap-slot");
+      }).join("");
     } else if (object.attrs) {
-      body = Object.entries(object.attrs).map(([name, value]) =>
-        `<div class="heap-dict-row"><span class="heap-dict-key">${escapeHtml(name)}</span><span class="heap-dict-arrow">=</span>${renderEncodedInline(value, heap, labels)}</div>`
-      ).join("");
+      body = Object.entries(object.attrs).map(([name, value]) => {
+        const slotLabel = `${label}.${name}`;
+        return `<div class="heap-dict-row"><span class="heap-dict-key">${escapeHtml(name)}</span><span class="heap-dict-arrow">=</span>${focusSlotButton(slotLabel, "attr", object.id, name, renderEncodedInline(value, heap, labels))}</div>`;
+      }).join("");
     }
     if (!body) body = `<p class="tutor-empty">Empty</p>`;
-    const label = labelForRef(object.id, heap, labels);
-    return `<article class="heap-object"><div class="heap-object-title"><span class="heap-object-name">${escapeHtml(label)}</span><span class="heap-object-type">${escapeHtml(object.type)}</span></div><div class="heap-object-body">${body}</div></article>`;
+    return `<article class="heap-object"><button class="heap-object-title" type="button" data-focus-id="${escapeAttr(object.id)}" data-focus-label="${escapeAttr(label)}" title="Show only ${escapeAttr(label)}"><span class="heap-object-name">${escapeHtml(label)}</span><span class="heap-object-type">${escapeHtml(object.type)}</span></button><div class="heap-object-body">${body}</div></article>`;
   }).join("");
+}
+
+function renderFocusValue(encoded, heap, labels, stack, depth) {
+  if (!encoded) return `<span class="heap-value">?</span>`;
+  if (encoded.kind !== "ref") {
+    return `<span class="focus-primitive"><span class="focus-type">${escapeHtml(encoded.type)}</span>${escapeHtml(encoded.value)}</span>`;
+  }
+  if (stack.has(encoded.id)) {
+    return `<span class="heap-value is-ref">↻ ${escapeHtml(labelForRef(encoded.id, heap, labels))}</span>`;
+  }
+  const object = heap?.[encoded.id];
+  if (!object) return `<span class="heap-value">missing</span>`;
+  if (depth >= 10) {
+    return `<span class="heap-value is-ref">→ ${escapeHtml(labelForRef(encoded.id, heap, labels))} (${escapeHtml(object.type)})</span>`;
+  }
+
+  stack.add(encoded.id);
+  let inner = "";
+  if (object.elements) {
+    inner = object.elements.length
+      ? object.elements.map((value, index) =>
+          `<div class="focus-row"><span class="heap-index">${index}</span><div>${renderFocusValue(value, heap, labels, stack, depth + 1)}</div></div>`
+        ).join("")
+      : `<p class="tutor-empty">Empty ${escapeHtml(object.type)}</p>`;
+  } else if (object.entries) {
+    inner = object.entries.length
+      ? object.entries.map(([key, value]) =>
+          `<div class="focus-entry"><div>${renderFocusValue(key, heap, labels, stack, depth + 1)}</div><span class="heap-dict-arrow">→</span><div>${renderFocusValue(value, heap, labels, stack, depth + 1)}</div></div>`
+        ).join("")
+      : `<p class="tutor-empty">Empty dict</p>`;
+  } else if (object.attrs) {
+    const attrs = Object.entries(object.attrs);
+    inner = attrs.length
+      ? attrs.map(([name, value]) =>
+          `<div class="focus-entry"><span class="heap-dict-key">${escapeHtml(name)}</span><span class="heap-dict-arrow">=</span><div>${renderFocusValue(value, heap, labels, stack, depth + 1)}</div></div>`
+        ).join("")
+      : `<p class="tutor-empty">No attributes</p>`;
+  } else {
+    inner = `<p class="tutor-empty">Empty</p>`;
+  }
+  stack.delete(encoded.id);
+  return `<div class="focus-card"><div class="focus-card-type">${escapeHtml(object.type)}</div><div class="focus-card-body">${inner}</div></div>`;
+}
+
+function resolveFocusedVar(focus, frames, heap, labels) {
+  if (!focus) return null;
+  if (focus.kind === "local") {
+    const frame = frames?.[focus.frameIndex];
+    const encoded = frame?.locals?.[focus.name];
+    if (!frame || !encoded) return { missing: true, kicker: "Variable", label: focus.name };
+    const typeName = encoded.kind === "ref" ? heap?.[encoded.id]?.type : encoded.type;
+    return { kicker: frame.name, label: focus.name, typeName, encoded };
+  }
+  if (focus.kind === "heap") {
+    const object = heap?.[focus.id];
+    if (!object) return { missing: true, kicker: "Object", label: focus.label || "object" };
+    return { kicker: object.type, label: focus.label || labelForRef(focus.id, heap, labels), typeName: object.type, encoded: { kind: "ref", id: focus.id } };
+  }
+  if (focus.kind === "component") {
+    const object = heap?.[focus.parentId];
+    if (!object) return { missing: true, kicker: "Value", label: focus.label || "value" };
+    let encoded = null;
+    if (focus.part === "element") encoded = object.elements?.[Number(focus.index)];
+    else if (focus.part === "entry") encoded = object.entries?.[Number(focus.index)]?.[1];
+    else if (focus.part === "entry-key") encoded = object.entries?.[Number(focus.index)]?.[0];
+    else if (focus.part === "attr") encoded = object.attrs?.[focus.index];
+    if (!encoded) return { missing: true, kicker: "Value", label: focus.label || "value" };
+    const typeName = encoded.kind === "ref" ? heap?.[encoded.id]?.type : encoded.type;
+    return { kicker: typeName || "Value", label: focus.label || "value", typeName, encoded };
+  }
+  return null;
+}
+
+function renderFocusedVar(focus, frames, heap, labels) {
+  const resolved = resolveFocusedVar(focus, frames, heap, labels);
+  tutorVarFocusKicker.textContent = resolved?.kicker || "Variable";
+  tutorVarFocusTitle.textContent = resolved?.label || "Variable";
+  if (!resolved || resolved.missing) {
+    tutorVarFocusBody.innerHTML = `<p class="tutor-empty">This variable is not in memory at this step.</p>`;
+    return;
+  }
+  tutorVarFocusBody.innerHTML = renderFocusValue(resolved.encoded, heap, labels, new Set(), 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1242,23 +1351,26 @@ function graphZoomFor(tab) {
   return clampGraphZoom(tab?.graphZoom ?? GRAPH_ZOOM_DEFAULT);
 }
 
-function applyGraphZoom(tab = getActiveTab()) {
-  const zoom = graphZoomFor(tab);
-  if (tab) tab.graphZoom = zoom;
-  if (graphZoomInput && document.activeElement !== graphZoomInput) {
-    graphZoomInput.value = String(zoom);
-  }
-  const svg = tutorGraphCanvas?.querySelector(".graph-svg");
+function scaleGraphSvg(root, bar, input, zoom) {
+  const svg = root?.querySelector(".graph-svg");
   if (!svg) {
-    if (graphZoomBar) graphZoomBar.hidden = true;
+    if (bar) bar.hidden = true;
     return;
   }
-  if (graphZoomBar) graphZoomBar.hidden = false;
+  if (bar) bar.hidden = false;
+  if (input && document.activeElement !== input) input.value = String(zoom);
   const scale = zoom / 100;
   const width = Number(svg.dataset.baseWidth) || svg.viewBox.baseVal.width;
   const height = Number(svg.dataset.baseHeight) || svg.viewBox.baseVal.height;
   svg.style.width = `${width * scale}px`;
   svg.style.height = `${height * scale}px`;
+}
+
+function applyGraphZoom(tab = getActiveTab()) {
+  const zoom = graphZoomFor(tab);
+  if (tab) tab.graphZoom = zoom;
+  scaleGraphSvg(tutorGraphCanvas, graphZoomBar, graphZoomInput, zoom);
+  scaleGraphSvg(tutorPathCanvas, pathZoomBar, pathZoomInput, zoom);
 }
 
 function setGraphZoom(value) {
@@ -1462,7 +1574,7 @@ function curvedEdgeGeometry(from, to, radius, offset, arrowGap) {
   return { path: `M ${start.x} ${start.y} Q ${control.x} ${control.y} ${end.x} ${end.y}`, mid };
 }
 
-function renderGraphSvg(graph, pointers, marks, nextKey) {
+function renderGraphSvg(graph, pointers, marks, nextKey, overlay = null, markerPrefix = "graph") {
   const count = graph.nodes.length;
   const longest = Math.max(...graph.nodes.map((node) => Math.min(node.label.length, 8)));
   const radius = Math.max(16, Math.min(30, 7 + longest * 3.8));
@@ -1482,11 +1594,15 @@ function renderGraphSvg(graph, pointers, marks, nextKey) {
   };
 
   const focus = graphFocus(graph, pointers);
+  const onManagedPath = (from, to) => overlay?.pathEdges?.has(`${from}\0${to}`) || overlay?.pathEdges?.has(`${to}\0${from}`);
   const edgeSvg = graphEdgeList(graph).map(({ from, to, weight }) => {
     const a = positions.get(from);
     const b = positions.get(to);
-    const active = focus.isFocusEdge(from, to) ? " active" : "";
-    const marker = graph.directed ? ` marker-end="url(#graph-arrow${active ? "-active" : ""})"` : "";
+    const managed = onManagedPath(from, to);
+    const active = !managed && focus.isFocusEdge(from, to) ? " active" : "";
+    const pathClass = managed ? " path" : "";
+    const markerName = managed ? `${markerPrefix}-arrow-path` : active ? `${markerPrefix}-arrow-active` : `${markerPrefix}-arrow`;
+    const marker = graph.directed ? ` marker-end="url(#${markerName})"` : "";
     let path;
     let mid;
     if (from === to) {
@@ -1503,7 +1619,7 @@ function renderGraphSvg(graph, pointers, marks, nextKey) {
     const label = weight !== null && weight !== undefined
       ? `<g class="graph-weight"><rect x="${mid.x - (String(weight).length * 3.6 + 5)}" y="${mid.y - 8}" width="${String(weight).length * 7.2 + 10}" height="16" rx="5" /><text x="${mid.x}" y="${mid.y + 4}">${escapeHtml(weight)}</text></g>`
       : "";
-    return `<path class="graph-edge${active}" d="${path}"${marker} />${label}`;
+    return `<path class="graph-edge${active}${pathClass}" d="${path}"${marker} />${label}`;
   }).join("");
 
   const nodeSvg = graph.nodes.map((node) => {
@@ -1512,8 +1628,14 @@ function renderGraphSvg(graph, pointers, marks, nextKey) {
     grow(x + radius + 6, y + radius + 6);
     const nodePointers = pointers.get(node.key) || [];
     const state = nodePointers.some((p) => p.kind === "active") ? "active" : nodePointers.length ? "outer" : "";
-    const classes = ["tree-node", state, marks.visited.has(node.key) ? "visited" : ""].filter(Boolean).join(" ");
+    const onPath = overlay?.pathNodes?.has(node.key);
+    const classes = ["tree-node", state, marks.visited.has(node.key) ? "visited" : "", onPath ? "on-path" : "", onPath && node.key === overlay?.tip ? "tip" : ""].filter(Boolean).join(" ");
     const shownLabel = node.label.length > 8 ? `${node.label.slice(0, 7)}…` : node.label;
+    const cost = overlay?.dist?.get(node.key);
+    const costSvg = cost == null
+      ? ""
+      : `<text class="graph-cost" x="${x}" y="${y - radius - 8}">${escapeHtml(formatPathCost(cost))}</text>`;
+    if (cost != null) grow(x, y - radius - 16);
 
     let pointerSvg = "";
     if (nodePointers.length) {
@@ -1536,6 +1658,7 @@ function renderGraphSvg(graph, pointers, marks, nextKey) {
       : "";
     return `
       ${ring}
+      ${costSvg}
       <g class="${classes}">
         <title>${escapeHtml(node.label)}</title>
         <circle cx="${x}" cy="${y}" r="${radius}" />
@@ -1550,7 +1673,7 @@ function renderGraphSvg(graph, pointers, marks, nextKey) {
   const arrow = (id) => `<marker id="${id}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" /></marker>`;
   return `
     <svg class="tree-svg graph-svg" viewBox="${bounds.minX - pad} ${bounds.minY - pad} ${width} ${height}" data-base-width="${width}" data-base-height="${height}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Graph diagram">
-      <defs>${arrow("graph-arrow")}${arrow("graph-arrow-active")}</defs>
+      <defs>${arrow(`${markerPrefix}-arrow`)}${arrow(`${markerPrefix}-arrow-active`)}${arrow(`${markerPrefix}-arrow-path`)}</defs>
       ${edgeSvg}
       ${nodeSvg}
     </svg>`;
@@ -1639,14 +1762,384 @@ function renderTutorGraph(frames, heap, labels) {
   renderGraphAdjacency(graph, pointers, marks, repr);
 }
 
-const TUTOR_VIEWS = ["memory", "tree", "graph"];
+// ---------------------------------------------------------------------------
+// Path calculation
+// A route kept as a list, rebuilt from parent pointers, or carried on a heap.
+// ---------------------------------------------------------------------------
+
+const PATH_DIST_NAMES = ["dist", "dists", "distance", "distances", "effort", "efforts", "shortest", "cost", "costs", "best"];
+const PATH_PARENT_NAMES = ["parent", "parents", "prev", "previous", "came_from", "predecessor", "pred"];
+const PATH_LIST_NAMES = ["path", "route", "trail", "best_path", "shortest_path"];
+const PATH_FRONTIER_NAMES = ["heap", "min_heap", "pq", "priority_queue", "frontier", "queue", "q", "deque", "stack"];
+const PATH_CURRENT_NAMES = ["node", "current", "curr", "cur", "u"];
+const PATH_END_NAMES = ["end", "target", "dest", "dst", "goal", "finish"];
+
+function formatPathCost(value) {
+  const text = String(value);
+  if (text === "inf" || text === "Infinity") return "∞";
+  if (text === "-inf" || text === "-Infinity") return "−∞";
+  return text;
+}
+
+function nodeKeyOnly(encoded, graph, heap) {
+  if (!encoded) return null;
+  if (encoded.kind === "primitive") {
+    const ref = graphNodeRef(encoded, heap, false);
+    return ref && graph.nodeKeys.has(ref.key) ? ref.key : null;
+  }
+  const object = heap[encoded.id];
+  if (!object) return null;
+  if (isInstance(object)) {
+    const key = `obj:${encoded.id}`;
+    return graph.nodeKeys.has(key) ? key : null;
+  }
+  if (object.type === "tuple" && object.elements.every((item) => item?.kind === "primitive")) {
+    const ref = graphNodeRef(encoded, heap, true);
+    return ref && graph.nodeKeys.has(ref.key) ? ref.key : null;
+  }
+  return null;
+}
+
+function sequenceOfNodes(encoded, graph, heap) {
+  if (encoded?.kind !== "ref") return null;
+  const object = heap[encoded.id];
+  if (!object?.elements?.length) return null;
+  const keys = [];
+  for (const item of object.elements) {
+    const key = nodeKeyOnly(item, graph, heap);
+    if (!key) return null;
+    keys.push(key);
+  }
+  return keys;
+}
+
+function numericNodeMap(encoded, graph, heap) {
+  if (encoded?.kind !== "ref") return null;
+  const object = heap[encoded.id];
+  if (!object?.entries?.length) return null;
+  const map = new Map();
+  for (const [key, value] of object.entries) {
+    const node = nodeKeyOnly(key, graph, heap);
+    if (!node || !isNumericPrimitive(value)) return null;
+    map.set(node, value.value);
+  }
+  return map.size ? map : null;
+}
+
+function numericNodeVector(encoded, graph, heap) {
+  if (encoded?.kind !== "ref") return null;
+  const object = heap[encoded.id];
+  if (!object?.elements?.length) return null;
+  if (!graph.nodes.some((node) => node.key.startsWith("int:"))) return null;
+  const map = new Map();
+  object.elements.forEach((item, index) => {
+    const key = `int:${index}`;
+    if (graph.nodeKeys.has(key) && isNumericPrimitive(item)) map.set(key, item.value);
+  });
+  return map.size ? map : null;
+}
+
+function isNullParent(encoded) {
+  return encoded?.kind === "primitive" && (encoded.value === "None" || encoded.value === "-1");
+}
+
+function parentNodeMap(encoded, graph, heap) {
+  if (encoded?.kind !== "ref") return null;
+  const object = heap[encoded.id];
+  if (!object?.entries?.length) return null;
+  const map = new Map();
+  for (const [key, value] of object.entries) {
+    const node = nodeKeyOnly(key, graph, heap);
+    if (!node) return null;
+    if (isNullParent(value)) {
+      map.set(node, null);
+      continue;
+    }
+    const parent = nodeKeyOnly(value, graph, heap);
+    if (!parent) return null;
+    map.set(node, parent);
+  }
+  return map.size ? map : null;
+}
+
+function parentNodeVector(encoded, graph, heap) {
+  if (encoded?.kind !== "ref") return null;
+  const object = heap[encoded.id];
+  if (!object?.elements?.length) return null;
+  if (!graph.nodes.some((node) => node.key.startsWith("int:"))) return null;
+  const map = new Map();
+  for (let index = 0; index < object.elements.length; index++) {
+    const self = `int:${index}`;
+    if (!graph.nodeKeys.has(self)) continue;
+    const item = object.elements[index];
+    if (isNullParent(item)) {
+      map.set(self, null);
+      continue;
+    }
+    const parent = nodeKeyOnly(item, graph, heap);
+    if (!parent) return null;
+    map.set(self, parent);
+  }
+  return map.size ? map : null;
+}
+
+function parseFrontierEntry(encoded, graph, heap) {
+  if (!encoded) return null;
+  const single = nodeKeyOnly(encoded, graph, heap);
+  if (encoded.kind !== "ref") return single ? { cost: null, node: single, path: [single] } : null;
+  const object = heap[encoded.id];
+  if (!object) return null;
+  if (isInstance(object)) return single ? { cost: null, node: single, path: [single] } : null;
+  if (!object.elements?.length) return null;
+
+  const els = object.elements;
+  const nodeAt = (index) => nodeKeyOnly(els[index], graph, heap);
+  const numberAt = (index) => (isNumericPrimitive(els[index]) ? els[index].value : null);
+  const pathAt = (index) => sequenceOfNodes(els[index], graph, heap);
+
+  if (els.every((_, index) => nodeAt(index))) {
+    const path = els.map((_, index) => nodeAt(index));
+    return { cost: null, node: path.at(-1), path };
+  }
+  if (els.length === 3 && numberAt(0) !== null && nodeAt(1) && pathAt(2)) {
+    return { cost: numberAt(0), node: nodeAt(1), path: pathAt(2) };
+  }
+  if ((els.length === 2 || els.length === 3) && numberAt(0) !== null && pathAt(1)) {
+    return { cost: numberAt(0), node: pathAt(1).at(-1), path: pathAt(1) };
+  }
+  if (els.length === 2 && numberAt(0) !== null && nodeAt(1)) {
+    return { cost: numberAt(0), node: nodeAt(1), path: [nodeAt(1)] };
+  }
+  if (els.length === 2 && nodeAt(0) && numberAt(1) !== null) {
+    return { cost: numberAt(1), node: nodeAt(0), path: [nodeAt(0)] };
+  }
+  if ((els.length === 2 || els.length === 3) && nodeAt(0) && pathAt(1)) {
+    return { cost: numberAt(2), node: nodeAt(0), path: pathAt(1) };
+  }
+  if (els.length === 2 && pathAt(0) && numberAt(1) !== null) {
+    return { cost: numberAt(1), node: pathAt(0).at(-1), path: pathAt(0) };
+  }
+  return null;
+}
+
+function frontierEntries(encoded, graph, heap) {
+  if (encoded?.kind !== "ref") return null;
+  const object = heap[encoded.id];
+  if (!object?.elements) return null;
+  if (!object.elements.length) return [];
+  const entries = [];
+  for (const item of object.elements) {
+    const entry = parseFrontierEntry(item, graph, heap);
+    if (!entry) return null;
+    entries.push(entry);
+  }
+  return entries;
+}
+
+function pathRows(frames, graphName) {
+  const rows = [];
+  [...(frames || [])].reverse().forEach((frame) => {
+    Object.entries(frame.locals || {}).forEach(([name, value]) => {
+      if (name !== graphName) rows.push({ name, value });
+    });
+  });
+  return rows;
+}
+
+function pickNamedValue(rows, names, parse) {
+  for (const wanted of names) {
+    for (const row of rows) {
+      if (row.name.toLowerCase() !== wanted) continue;
+      const parsed = parse(row.value);
+      if (parsed == null) continue;
+      return { name: row.name, parsed };
+    }
+  }
+  return null;
+}
+
+function reconstructPath(parents, start) {
+  const path = [];
+  const seen = new Set();
+  let cursor = start;
+  while (cursor && !seen.has(cursor)) {
+    seen.add(cursor);
+    path.push(cursor);
+    if (!parents.has(cursor) || !parents.get(cursor)) break;
+    cursor = parents.get(cursor);
+  }
+  path.reverse();
+  return path;
+}
+
+function longestParentChain(parents) {
+  let best = [];
+  parents.forEach((_, key) => {
+    const chain = reconstructPath(parents, key);
+    if (chain.length > best.length) best = chain;
+  });
+  return best;
+}
+
+function managedPathEdges(graph, keys) {
+  const edges = new Set();
+  const linked = (from, to) => (graph.adjacency.get(from) || []).some((edge) => edge.to === to);
+  for (let index = 0; index < keys.length - 1; index++) {
+    const from = keys[index];
+    const to = keys[index + 1];
+    if (linked(from, to) || (!graph.directed && linked(to, from))) {
+      edges.add(`${from}\0${to}`);
+      edges.add(`${to}\0${from}`);
+    }
+  }
+  return edges;
+}
+
+function collectPathState(frames, graph, heap) {
+  const rows = pathRows(frames, graph.name);
+  const dist = pickNamedValue(rows, PATH_DIST_NAMES, (value) => numericNodeMap(value, graph, heap) || numericNodeVector(value, graph, heap));
+  const parents = pickNamedValue(rows, PATH_PARENT_NAMES, (value) => parentNodeMap(value, graph, heap) || parentNodeVector(value, graph, heap));
+  const listed = pickNamedValue(rows, PATH_LIST_NAMES, (value) => sequenceOfNodes(value, graph, heap));
+  const frontier = pickNamedValue(rows, PATH_FRONTIER_NAMES, (value) => frontierEntries(value, graph, heap));
+  const current = pickNamedValue(rows, PATH_CURRENT_NAMES, (value) => nodeKeyOnly(value, graph, heap));
+  const end = pickNamedValue(rows, PATH_END_NAMES, (value) => nodeKeyOnly(value, graph, heap));
+
+  let path = listed?.parsed || [];
+  let pathSource = listed ? listed.name : "";
+  let pathCost = null;
+
+  const frontierNext = frontier?.parsed?.length
+    ? (/stack|dfs/i.test(frontier.name) ? frontier.parsed.length - 1 : 0)
+    : -1;
+
+  if (!path.length && frontier && frontierNext >= 0 && frontier.parsed[frontierNext].path.length > 1) {
+    path = frontier.parsed[frontierNext].path;
+    pathSource = `${frontier.name}[${frontierNext}]`;
+    pathCost = frontier.parsed[frontierNext].cost;
+  }
+
+  if (!path.length && parents?.parsed?.size) {
+    const table = parents.parsed;
+    let anchor = null;
+    if (end?.parsed && table.get(end.parsed)) anchor = end.parsed;
+    else if (current?.parsed && table.has(current.parsed)) anchor = current.parsed;
+    path = anchor ? reconstructPath(table, anchor) : longestParentChain(table);
+    if (path.length) pathSource = parents.name;
+  }
+
+  if (pathCost == null && dist && path.length) pathCost = dist.parsed.get(path.at(-1)) ?? null;
+
+  return {
+    path,
+    pathSource,
+    pathCost,
+    dist: dist ? { name: dist.name, map: dist.parsed } : null,
+    parents: parents ? { name: parents.name, map: parents.parsed } : null,
+    frontier: frontier ? { name: frontier.name, entries: frontier.parsed, nextIndex: frontierNext } : null,
+    current: current?.parsed || null
+  };
+}
+
+function renderPathState(state, graph) {
+  const label = (key) => escapeHtml(nodeLabelFromKey(graph, key));
+  const sequence = state.path.length
+    ? state.path.map((key, index) =>
+        `<span class="graph-search-chip${index === state.path.length - 1 ? " next" : ""}">${label(key)}</span>`
+      ).join('<span class="path-arrow">→</span>')
+    : `<span class="graph-search-empty">no path yet</span>`;
+  const costNote = state.pathCost != null ? ` · ${escapeHtml(formatPathCost(state.pathCost))}` : "";
+  const distChips = state.dist
+    ? [...state.dist.map.entries()].map(([key, cost]) =>
+        `<span class="graph-search-chip${state.path.includes(key) ? " next" : ""}">${label(key)}<span class="path-cost">${escapeHtml(formatPathCost(cost))}</span></span>`
+      ).join("")
+    : `<span class="graph-search-empty">none</span>`;
+  const frontierBody = !state.frontier
+    ? `<span class="graph-search-empty">none</span>`
+    : state.frontier.entries.length
+      ? `<div class="path-frontier">${state.frontier.entries.map((entry, index) => {
+          const nodes = entry.path.map((key) => nodeLabelFromKey(graph, key)).join(" → ");
+          const cost = entry.cost != null ? escapeHtml(formatPathCost(entry.cost)) : "·";
+          return `<div class="path-frontier-row${index === state.frontier.nextIndex ? " next" : ""}"><span class="path-frontier-cost">${cost}</span><span class="path-frontier-nodes">${escapeHtml(nodes)}</span></div>`;
+        }).join("")}</div>`
+      : `<span class="graph-search-empty">empty</span>`;
+  const parentChips = state.parents
+    ? [...state.parents.map.entries()].filter(([, parent]) => parent).map(([node, parent]) =>
+        `<span class="graph-search-chip">${label(node)} ← ${label(parent)}</span>`
+      ).join("") || `<span class="graph-search-empty">none yet</span>`
+    : `<span class="graph-search-empty">none</span>`;
+
+  tutorPathState.hidden = false;
+  tutorPathState.innerHTML = `
+    <div class="graph-search-block">
+      <div class="graph-search-label">${escapeHtml(state.pathSource || "path")}${costNote}</div>
+      <div class="path-sequence">${sequence}</div>
+    </div>
+    <div class="graph-search-block">
+      <div class="graph-search-label">${escapeHtml(state.dist?.name || "dist")}</div>
+      <div class="graph-search-chips">${distChips}</div>
+    </div>
+    <div class="graph-search-block">
+      <div class="graph-search-label">${escapeHtml(state.frontier?.name || "heap / queue")}${state.frontier?.nextIndex >= 0 ? " · next" : ""}</div>
+      ${frontierBody}
+    </div>
+    <div class="graph-search-block">
+      <div class="graph-search-label">${escapeHtml(state.parents?.name || "parent")}</div>
+      <div class="graph-search-chips">${parentChips}</div>
+    </div>
+  `;
+}
+
+function renderPathLegend(graphs, graph, state) {
+  const picker = graphs.length > 1
+    ? `<div class="tree-legend-row"><span class="traversal-label">Graph</span>${graphs.map((option) => `
+        <button class="graph-source-button${option === graph ? " active" : ""}" type="button" data-graph-source="${escapeAttr(option.name)}">${escapeHtml(option.name)}</button>`).join("")}</div>`
+    : "";
+  tutorPathLegend.innerHTML = `
+    ${picker}
+    <div class="tree-legend-row">
+      <span class="tree-chip active"><strong>${escapeHtml(graph.name)}</strong> path</span>
+      <span class="tree-key"><span class="tree-swatch path"></span>${state.pathSource ? `From ${escapeHtml(state.pathSource)}` : "No path variable yet"}</span>
+      ${state.dist ? `<span class="tree-key"><span class="tree-swatch cost"></span>${escapeHtml(state.dist.name)} on each node</span>` : ""}
+    </div>
+    <p class="path-note">Follows a path list, a parent or prev map, a dist / cost / effort dict, and a heap or queue of candidate paths.</p>
+  `;
+}
+
+function renderTutorPath(frames, heap, labels) {
+  const tab = getActiveTab();
+  const graphs = findGraphs(frames, heap, labels);
+  if (!graphs.length) {
+    tutorPathLegend.innerHTML = "";
+    tutorPathState.hidden = true;
+    if (pathZoomBar) pathZoomBar.hidden = true;
+    tutorPathCanvas.innerHTML = `<p class="tutor-empty">No graph in memory at this step. The Path tab reads a graph together with the variables that manage a route: a <code>path</code> list, a <code>parent</code> or <code>prev</code> map, a <code>dist</code> / <code>cost</code> / <code>effort</code> dict, or a heap of <code>(cost, node, path)</code>.</p>`;
+    return;
+  }
+
+  const graph = graphs.find((option) => option.name === tab?.graphSource) || graphs[0];
+  const pointers = collectGraphPointers(frames, graph, heap);
+  const marks = collectGraphMarks(frames, graph, heap);
+  const state = collectPathState(frames, graph, heap);
+  renderPathLegend(graphs, graph, state);
+  tutorPathCanvas.innerHTML = renderGraphSvg(graph, pointers, marks, null, {
+    pathNodes: new Set(state.path),
+    pathEdges: managedPathEdges(graph, state.path),
+    dist: state.dist?.map || null,
+    tip: state.path.at(-1) || null
+  }, "path");
+  applyGraphZoom(tab);
+  renderPathState(state, graph);
+}
+
+const TUTOR_VIEWS = ["memory", "tree", "graph", "path"];
 
 function applyTutorView(tab) {
   const view = TUTOR_VIEWS.includes(tab?.tutorView) ? tab.tutorView : "memory";
   tutorMemoryLayout.hidden = view !== "memory";
   tutorTreeView.hidden = view !== "tree";
   tutorGraphView.hidden = view !== "graph";
-  [[tutorMemoryViewButton, "memory"], [tutorTreeViewButton, "tree"], [tutorGraphViewButton, "graph"]].forEach(([button, option]) => {
+  tutorPathView.hidden = view !== "path";
+  [[tutorMemoryViewButton, "memory"], [tutorTreeViewButton, "tree"], [tutorGraphViewButton, "graph"], [tutorPathViewButton, "path"]].forEach(([button, option]) => {
     button.classList.toggle("active", view === option);
     button.setAttribute("aria-selected", String(view === option));
   });
@@ -1701,7 +2194,8 @@ function createTab(initialCode = null) {
     graphRepr: null,
     graphSource: null,
     graphSearch: "bfs",
-    graphZoom: GRAPH_ZOOM_DEFAULT
+    graphZoom: GRAPH_ZOOM_DEFAULT,
+    focusedVar: null
   };
   tabs.push(newTab);
   switchTab(newTab.id);
@@ -1804,6 +2298,7 @@ function exitTutorMode(clearConsole = true) {
   tab.tutorStepIndex = 0;
   tab.tutorStatus = "";
   tab.tutorMethods = [];
+  tab.focusedVar = null;
   if (clearConsole) {
     tab.consoleOutput = "Run or Visualize to see output...";
   }
@@ -1907,6 +2402,19 @@ function updateTutorControls(tab) {
   tutorSkipMethod.dataset.target = String(nextMethod);
 }
 
+function renderTutorMemory(frames, heap, labels, names) {
+  const tab = getActiveTab();
+  const focusing = Boolean(tab?.focusedVar);
+  tutorMemoryLayout.classList.toggle("is-focused", focusing);
+  tutorVarFocus.hidden = !focusing;
+  if (focusing) {
+    renderFocusedVar(tab.focusedVar, frames, heap, labels);
+    return;
+  }
+  renderTutorFrames(frames, heap, labels, names);
+  renderTutorHeap(heap, labels);
+}
+
 function showTutorStep(index) {
   const tab = getActiveTab();
   if (!tab || !tab.tutorSteps.length) return;
@@ -1927,9 +2435,10 @@ function showTutorStep(index) {
     renderTutorTree(step.frames, step.heap, labels);
   } else if (tab.tutorView === "graph") {
     renderTutorGraph(step.frames, step.heap, labels);
+  } else if (tab.tutorView === "path") {
+    renderTutorPath(step.frames, step.heap, labels);
   } else {
-    renderTutorFrames(step.frames, step.heap, labels, names);
-    renderTutorHeap(step.heap, labels);
+    renderTutorMemory(step.frames, step.heap, labels, names);
   }
 
   const stepOutput = step.stdout?.trim()
@@ -2136,28 +2645,97 @@ tutorSlider.addEventListener("input", () => {
 
 tutorMemoryViewButton.addEventListener("click", () => setTutorView("memory"));
 tutorTreeViewButton.addEventListener("click", () => setTutorView("tree"));
-  tutorGraphViewButton.addEventListener("click", () => setTutorView("graph"));
+tutorGraphViewButton.addEventListener("click", () => setTutorView("graph"));
+tutorPathViewButton.addEventListener("click", () => setTutorView("path"));
+
+function typingInVisibleField(target) {
+  if (!target || target === document.body || target === document.documentElement) return false;
+  const tag = target.tagName;
+  if (tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT" && !target.isContentEditable) return false;
+  if (target.hidden || target.closest("[hidden]")) return false;
+  if (target.id === "notesText" && scratchEditor.classList.contains("tracing")) return false;
+  return true;
+}
+
+document.addEventListener("keydown", (event) => {
+  if (event.metaKey || event.ctrlKey || event.altKey) return;
+  const key = event.key.toLowerCase();
+  if (key !== "a" && key !== "d") return;
+  const tab = getActiveTab();
+  if (!tab?.tutorActive || typingInVisibleField(event.target)) return;
+  const button = key === "a" ? tutorPrev : tutorNext;
+  if (button.disabled) return;
+  event.preventDefault();
+  showTutorStep(tab.tutorStepIndex + (key === "d" ? 1 : -1));
+});
+
+tutorMemoryLayout.addEventListener("click", (event) => {
+  const tab = getActiveTab();
+  if (!tab) return;
+  const component = event.target.closest("[data-focus-part]");
+  const frameVar = event.target.closest("[data-focus-frame]");
+  const heapObject = event.target.closest("[data-focus-id]");
+  if (component) {
+    tab.focusedVar = {
+      kind: "component",
+      parentId: component.dataset.focusParent,
+      part: component.dataset.focusPart,
+      index: component.dataset.focusIndex,
+      label: component.dataset.focusLabel
+    };
+  } else if (frameVar) {
+    tab.focusedVar = {
+      kind: "local",
+      frameIndex: Number(frameVar.dataset.focusFrame),
+      name: frameVar.dataset.focusName
+    };
+  } else if (heapObject) {
+    tab.focusedVar = {
+      kind: "heap",
+      id: heapObject.dataset.focusId,
+      label: heapObject.dataset.focusLabel
+    };
+  } else {
+    return;
+  }
+  if (tab.tutorActive) showTutorStep(tab.tutorStepIndex);
+});
+
+tutorVarFocusClose.addEventListener("click", () => {
+  const tab = getActiveTab();
+  if (!tab) return;
+  tab.focusedVar = null;
+  if (tab.tutorActive) showTutorStep(tab.tutorStepIndex);
+});
 
 graphZoomOutButton.addEventListener("click", () => bumpGraphZoom(-GRAPH_ZOOM_STEP));
 graphZoomInButton.addEventListener("click", () => bumpGraphZoom(GRAPH_ZOOM_STEP));
 graphZoomInput.addEventListener("change", () => setGraphZoom(graphZoomInput.value));
-graphZoomInput.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") {
-    event.preventDefault();
-    setGraphZoom(graphZoomInput.value);
-    graphZoomInput.blur();
-  }
-  if (event.key === "ArrowUp") {
-    event.preventDefault();
-    bumpGraphZoom(GRAPH_ZOOM_STEP);
-  }
-  if (event.key === "ArrowDown") {
-    event.preventDefault();
-    bumpGraphZoom(-GRAPH_ZOOM_STEP);
-  }
-});
+function bindGraphZoomInput(input) {
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      setGraphZoom(input.value);
+      input.blur();
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      bumpGraphZoom(GRAPH_ZOOM_STEP);
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      bumpGraphZoom(-GRAPH_ZOOM_STEP);
+    }
+  });
+}
 
-tutorGraphView.addEventListener("click", (event) => {
+bindGraphZoomInput(graphZoomInput);
+bindGraphZoomInput(pathZoomInput);
+pathZoomOutButton.addEventListener("click", () => bumpGraphZoom(-GRAPH_ZOOM_STEP));
+pathZoomInButton.addEventListener("click", () => bumpGraphZoom(GRAPH_ZOOM_STEP));
+pathZoomInput.addEventListener("change", () => setGraphZoom(pathZoomInput.value));
+
+function onGraphChromeClick(event) {
   const tab = getActiveTab();
   if (!tab) return;
   const reprButton = event.target.closest("[data-graph-repr]");
@@ -2168,7 +2746,10 @@ tutorGraphView.addEventListener("click", (event) => {
   else if (searchButton) tab.graphSearch = searchButton.dataset.graphSearch;
   else return;
   if (tab.tutorActive) showTutorStep(tab.tutorStepIndex);
-});
+}
+
+tutorGraphView.addEventListener("click", onGraphChromeClick);
+tutorPathView.addEventListener("click", onGraphChromeClick);
 
 tutorTreeQueues.addEventListener("click", (event) => {
   const button = event.target.closest("[data-traversal-mode]");
