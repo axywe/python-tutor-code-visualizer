@@ -52,6 +52,14 @@ const pathZoomOutButton = document.querySelector("#pathZoomOutButton");
 const pathZoomInButton = document.querySelector("#pathZoomInButton");
 const pathZoomInput = document.querySelector("#pathZoomInput");
 const pathZoomBar = document.querySelector("#pathZoomBar");
+const tutorDsuView = document.querySelector("#tutorDsuView");
+const tutorDsuLegend = document.querySelector("#tutorDsuLegend");
+const tutorDsuCanvas = document.querySelector("#tutorDsuCanvas");
+const tutorDsuParents = document.querySelector("#tutorDsuParents");
+const tutorDsuByRank = document.querySelector("#tutorDsuByRank");
+const tutorDsuBySize = document.querySelector("#tutorDsuBySize");
+const tutorDsuDetail = document.querySelector("#tutorDsuDetail");
+const tutorDsuViewButton = document.querySelector("#tutorDsuViewButton");
 const tutorVarFocus = document.querySelector("#tutorVarFocus");
 const tutorVarFocusKicker = document.querySelector("#tutorVarFocusKicker");
 const tutorVarFocusTitle = document.querySelector("#tutorVarFocusTitle");
@@ -2634,7 +2642,446 @@ function renderTutorPath(frames, heap, labels) {
   renderPathState(state, graph);
 }
 
-const TUTOR_VIEWS = ["memory", "tree", "graph", "path"];
+// ---------------------------------------------------------------------------
+// Disjoint Set Union
+// Rank and size are counted from the parent links. The code does not have
+// to keep a rank array or a size array for these numbers to update.
+// ---------------------------------------------------------------------------
+
+const DSU_PARENT_PATTERN = /^(parent|parents|par|parent_of|uf|dsu|disjoint|pi)$/i;
+const DSU_POINTER_PATTERN = /node|root|city|curr|current|^[abuvxyij]$/i;
+const DSU_HERE_PRIORITY = ["node", "current", "curr", "cur", "city", "i", "x", "j", "root_a", "a", "u", "root_b", "b", "v", "y"];
+const DSU_COLORS = ["#78dce8", "#c8a8ff", "#ffd866", "#72e0aa", "#ff9e64", "#ff7ab2", "#9ba3ff", "#f8cc5c"];
+const DSU_COL_W = 46;
+const DSU_ROW_H = 62;
+const DSU_NODE_R = 15;
+
+function isDsuParentName(name) {
+  const leaf = String(name).split(".").pop();
+  return DSU_PARENT_PATTERN.test(leaf);
+}
+
+function primitiveToken(encoded) {
+  if (encoded?.kind !== "primitive") return null;
+  if (encoded.type === "int") {
+    const value = Number(encoded.value);
+    if (!Number.isInteger(value)) return null;
+    return { key: String(value), label: String(value) };
+  }
+  if (encoded.type === "str") {
+    const label = stripQuotes(encoded.value);
+    return { key: `s:${label}`, label };
+  }
+  return null;
+}
+
+function compareDsuLabels(a, b) {
+  const aNum = Number(a);
+  const bNum = Number(b);
+  const aIsInt = Number.isInteger(aNum) && String(aNum) === a;
+  const bIsInt = Number.isInteger(bNum) && String(bNum) === b;
+  if (aIsInt && bIsInt) return aNum - bNum;
+  return String(a).localeCompare(String(b));
+}
+
+function parentLinksFromList(object) {
+  if (!object?.elements?.length || (object.type !== "list" && object.type !== "tuple")) return null;
+  const count = object.elements.length;
+  const pointers = [];
+  for (let index = 0; index < count; index += 1) {
+    const token = primitiveToken(object.elements[index]);
+    if (!token || token.key.startsWith("s:")) return null;
+    const raw = Number(token.label);
+    // A negative entry is the union-by-size root marker. The stored
+    // magnitude is ignored; size is counted from the links instead.
+    const parent = raw < 0 ? index : raw;
+    if (parent < 0 || parent >= count) return null;
+    pointers.push(String(parent));
+  }
+  return pointers.map((parentKey, index) => ({
+    key: String(index),
+    label: String(index),
+    parentKey
+  }));
+}
+
+function parentLinksFromDict(object) {
+  if (!object?.entries?.length) return null;
+  const nodes = new Map();
+  const edges = [];
+  for (const [keyEncoded, valueEncoded] of object.entries) {
+    const key = primitiveToken(keyEncoded);
+    const value = primitiveToken(valueEncoded);
+    if (!key || !value) return null;
+    nodes.set(key.key, key);
+    edges.push([key.key, value]);
+  }
+  edges.forEach(([, value]) => {
+    if (!nodes.has(value.key)) nodes.set(value.key, value);
+  });
+  return [...nodes.values()].map((token) => {
+    const edge = edges.find(([key]) => key === token.key);
+    const parentKey = edge && nodes.has(edge[1].key) ? edge[1].key : token.key;
+    return { key: token.key, label: token.label, parentKey };
+  });
+}
+
+function describeParentLinks(links) {
+  const byKey = new Map(links.map((link) => [link.key, link]));
+  const rootOf = (start) => {
+    const seen = new Set();
+    let cursor = start;
+    while (!seen.has(cursor)) {
+      seen.add(cursor);
+      const node = byKey.get(cursor);
+      if (!node) return null;
+      if (node.parentKey === cursor) return cursor;
+      cursor = node.parentKey;
+    }
+    return null;
+  };
+
+  const roots = new Map();
+  for (const link of links) {
+    const root = rootOf(link.key);
+    if (!root) return null;
+    roots.set(link.key, root);
+  }
+
+  const children = new Map();
+  links.forEach((link) => {
+    if (link.parentKey === link.key) return;
+    if (!children.has(link.parentKey)) children.set(link.parentKey, []);
+    children.get(link.parentKey).push(link.key);
+  });
+  children.forEach((kids) => kids.sort((a, b) => compareDsuLabels(byKey.get(a).label, byKey.get(b).label)));
+
+  const heightMemo = new Map();
+  const heightOf = (key) => {
+    if (heightMemo.has(key)) return heightMemo.get(key);
+    const kids = children.get(key) || [];
+    const height = kids.length ? 1 + Math.max(...kids.map(heightOf)) : 0;
+    heightMemo.set(key, height);
+    return height;
+  };
+
+  const members = new Map();
+  links.forEach((link) => {
+    const root = roots.get(link.key);
+    if (!members.has(root)) members.set(root, []);
+    members.get(root).push(link);
+  });
+
+  const groups = [...members.entries()].map(([rootKey, groupLinks]) => {
+    const ordered = groupLinks.slice().sort((a, b) => compareDsuLabels(a.label, b.label));
+    return {
+      rootKey,
+      rootLabel: byKey.get(rootKey).label,
+      rank: heightOf(rootKey),
+      size: ordered.length,
+      memberKeys: ordered.map((link) => link.key),
+      memberLabels: ordered.map((link) => link.label)
+    };
+  });
+
+  const nodes = links.map((link) => ({
+    ...link,
+    rootKey: roots.get(link.key),
+    rootLabel: byKey.get(roots.get(link.key)).label,
+    isRoot: link.parentKey === link.key
+  }));
+
+  return { nodes, groups, children, byKey };
+}
+
+function findDsuSets(frames, heap) {
+  const found = [];
+  const seen = new Set();
+  const consider = (bindingName, encoded, sourceKey) => {
+    if (!isDsuParentName(bindingName) || encoded?.kind !== "ref" || seen.has(encoded.id)) return;
+    const object = heap?.[encoded.id];
+    const links = parentLinksFromList(object) || parentLinksFromDict(object);
+    if (!links) return;
+    const described = describeParentLinks(links);
+    if (!described) return;
+    seen.add(encoded.id);
+    found.push({ key: sourceKey, name: sourceKey, ...described });
+  };
+
+  (frames || []).forEach((frame) => {
+    Object.entries(frame.locals || {}).forEach(([name, value]) => {
+      const sourceKey = frame.name === "Global frame" ? name : `${frame.name.replace(/\(\)$/, "")}.${name}`;
+      consider(name, value, sourceKey);
+    });
+  });
+  Object.values(heap || {}).forEach((object) => {
+    if (!object?.attrs) return;
+    Object.entries(object.attrs).forEach(([name, value]) => {
+      consider(name, value, `${object.type}.${name}`);
+    });
+  });
+  return found;
+}
+
+function dsuGroupSignature(group) {
+  return group.memberKeys.slice().sort().join("|");
+}
+
+function markDsuChanges(current, previous) {
+  const previousParent = new Map((previous?.nodes || []).map((node) => [node.key, node.parentKey]));
+  const previousGroups = new Set((previous?.groups || []).map(dsuGroupSignature));
+  const hasPrevious = Boolean(previous);
+  current.nodes.forEach((node) => {
+    node.parentChanged = hasPrevious && previousParent.get(node.key) !== node.parentKey;
+  });
+  current.groups.forEach((group) => {
+    group.changed = hasPrevious && !previousGroups.has(dsuGroupSignature(group));
+  });
+}
+
+function collectDsuPointers(frames, nodes) {
+  const keys = new Set(nodes.map((node) => node.key));
+  const pointers = new Map();
+  const frame = frames?.at(-1);
+  if (!frame) return pointers;
+  Object.entries(frame.locals || {}).forEach(([name, value]) => {
+    if (!DSU_POINTER_PATTERN.test(name)) return;
+    const token = primitiveToken(value);
+    if (!token || !keys.has(token.key)) return;
+    if (!pointers.has(token.key)) pointers.set(token.key, []);
+    pointers.get(token.key).push(name);
+  });
+  return pointers;
+}
+
+function currentDsuNode(pointers) {
+  let best = null;
+  let bestRank = Infinity;
+  pointers.forEach((names, key) => {
+    names.forEach((name) => {
+      const rank = DSU_HERE_PRIORITY.indexOf(name);
+      const score = rank === -1 ? DSU_HERE_PRIORITY.length : rank;
+      if (score < bestRank) {
+        bestRank = score;
+        best = { key, name };
+      }
+    });
+  });
+  return best;
+}
+
+function layoutDsuForest(described) {
+  const positions = new Map();
+  let cursor = 0;
+  let maxDepth = 0;
+  const spans = [];
+
+  const place = (key, left, depth) => {
+    const kids = described.children.get(key) || [];
+    if (!kids.length) {
+      positions.set(key, { x: left + 0.5, depth });
+      maxDepth = Math.max(maxDepth, depth);
+      return 1;
+    }
+    let childLeft = left;
+    kids.forEach((child) => {
+      childLeft += place(child, childLeft, depth + 1);
+    });
+    const first = positions.get(kids[0]);
+    const last = positions.get(kids[kids.length - 1]);
+    positions.set(key, { x: (first.x + last.x) / 2, depth });
+    maxDepth = Math.max(maxDepth, depth);
+    return childLeft - left;
+  };
+
+  const ordered = described.groups.slice().sort((a, b) => compareDsuLabels(a.rootLabel, b.rootLabel));
+  ordered.forEach((group) => {
+    const width = place(group.rootKey, cursor, 0);
+    const members = group.memberKeys.map((key) => positions.get(key).x);
+    spans.push({
+      group,
+      center: (Math.min(...members) + Math.max(...members)) / 2
+    });
+    cursor += width + 0.45;
+  });
+
+  return { positions, maxDepth, spans, widthUnits: Math.max(cursor - 0.45, 1) };
+}
+
+function renderDsuSvg(described, pointers, here) {
+  const layout = layoutDsuForest(described);
+  const pad = 28;
+  const width = Math.max(pad * 2 + layout.widthUnits * DSU_COL_W, 180);
+  const height = pad + layout.maxDepth * DSU_ROW_H + DSU_NODE_R + 36;
+  const colorOf = new Map(described.groups.map((group, index) => [group.rootKey, DSU_COLORS[index % DSU_COLORS.length]]));
+  const point = (key) => {
+    const pos = layout.positions.get(key);
+    return {
+      x: pad + pos.x * DSU_COL_W,
+      y: pad + pos.depth * DSU_ROW_H
+    };
+  };
+
+  const edges = described.nodes.filter((node) => !node.isRoot).map((node) => {
+    const from = point(node.key);
+    const to = point(node.parentKey);
+    const changed = node.parentChanged ? " changed" : "";
+    return `<line class="dsu-edge${changed}" x1="${from.x}" y1="${from.y - DSU_NODE_R}" x2="${to.x}" y2="${to.y + DSU_NODE_R}" />`;
+  }).join("");
+
+  const parentKey = here ? described.byKey.get(here.key)?.parentKey : null;
+  const nodes = described.nodes.map((node) => {
+    const { x, y } = point(node.key);
+    const names = pointers.get(node.key) || [];
+    const isHere = here && node.key === here.key;
+    const isParentNode = parentKey && node.key === parentKey && !isHere;
+    const classes = [
+      "tree-node",
+      node.isRoot ? "dsu-root" : "",
+      isHere ? "dsu-focus" : "",
+      isParentNode ? "dsu-parent-node" : ""
+    ].filter(Boolean).join(" ");
+    const label = node.label.length > 6 ? `${node.label.slice(0, 5)}…` : node.label;
+    const pointer = names.length
+      ? `<text class="dsu-pointer" x="${x}" y="${y + DSU_NODE_R + 12}">${escapeHtml(names.join(", "))}</text>`
+      : "";
+    return `
+      <g class="${classes}" style="--dsu-color:${colorOf.get(node.rootKey)}">
+        <title>${escapeHtml(node.label)} → ${escapeHtml(described.byKey.get(node.parentKey).label)}</title>
+        <circle cx="${x}" cy="${y}" r="${DSU_NODE_R}" />
+        <text x="${x}" y="${y + 4}">${escapeHtml(label)}</text>
+        ${pointer}
+      </g>`;
+  }).join("");
+
+  return `
+    <svg class="dsu-svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" role="img" aria-label="Disjoint set forest">
+      ${edges}
+      ${nodes}
+    </svg>`;
+}
+
+function renderDsuCards(groups, stat) {
+  const ordered = groups.slice().sort((a, b) => {
+    const diff = b[stat] - a[stat];
+    if (diff) return diff;
+    const other = stat === "rank" ? "size" : "rank";
+    return (b[other] - a[other]) || compareDsuLabels(a.rootLabel, b.rootLabel);
+  });
+  if (!ordered.length) return `<p class="tutor-empty">No groups yet.</p>`;
+  return ordered.map((group) => {
+    const other = stat === "rank" ? "size" : "rank";
+    return `
+      <article class="dsu-card${group.changed ? " changed" : ""}" style="border-left-color:${DSU_COLORS[groups.indexOf(group) % DSU_COLORS.length]}">
+        <div class="dsu-card-stat"><span>${stat}</span><strong>${group[stat]}</strong></div>
+        <div>
+          <div class="dsu-card-root">root ${escapeHtml(group.rootLabel)}</div>
+          <div class="dsu-card-meta">${other} ${group[other]}</div>
+          <div class="dsu-card-members">{${escapeHtml(group.memberLabels.join(", "))}}</div>
+        </div>
+      </article>`;
+  }).join("");
+}
+
+function renderDsuParentBoard(described, here) {
+  const nodes = described.nodes.slice().sort((a, b) => compareDsuLabels(a.label, b.label));
+  const hereNode = here ? described.byKey.get(here.key) : null;
+  const parentNode = hereNode ? described.byKey.get(hereNode.parentKey) : null;
+  const rows = nodes.map((node) => {
+    const isHere = Boolean(hereNode && node.key === hereNode.key);
+    const isParent = Boolean(parentNode && node.key === parentNode.key);
+    const classes = ["dsu-slot", isHere ? "here" : "", isParent && !isHere ? "parent" : "", isHere && isParent ? "parent" : ""].filter(Boolean).join(" ");
+    const tags = [];
+    if (isHere) tags.push(here.name);
+    if (isParent && isHere) tags.push("root");
+    else if (isParent) tags.push("parent");
+    return `
+      <div class="${classes}">
+        <span class="dsu-slot-index">${escapeHtml(node.label)}</span>
+        <span class="dsu-slot-value">${escapeHtml(described.byKey.get(node.parentKey).label)}</span>
+        <span class="dsu-slot-tag">${escapeHtml(tags.join(" · "))}</span>
+      </div>`;
+  }).join("");
+  const summary = hereNode
+    ? `on ${escapeHtml(here.name)} = ${escapeHtml(hereNode.label)}, parent value ${escapeHtml(parentNode.label)}`
+    : "Step into find, or onto a node index, to mark the current slot.";
+  tutorDsuParents.innerHTML = `
+    <div class="dsu-organize-label">Parent list</div>
+    <p class="dsu-parent-summary">${summary}</p>
+    <div class="dsu-slot-head"><span>i</span><span>parent[i]</span><span></span></div>
+    ${rows}`;
+  const currentRow = tutorDsuParents.querySelector(".dsu-slot.here");
+  if (currentRow) currentRow.scrollIntoView({ block: "nearest" });
+}
+
+function renderDsuDetail(described) {
+  const parents = described.nodes.slice().sort((a, b) => compareDsuLabels(a.label, b.label)).map((node) => `
+    <div class="dsu-parent-cell${node.parentChanged ? " changed" : ""}">
+      <span class="dsu-parent-node">${escapeHtml(node.label)}</span><span class="dsu-parent-arrow">→</span><span class="dsu-parent-target">${escapeHtml(described.byKey.get(node.parentKey).label)}</span>
+      <span class="dsu-parent-root">root ${escapeHtml(node.rootLabel)}</span>
+    </div>`).join("");
+  const groups = described.groups.slice().sort((a, b) => compareDsuLabels(a.rootLabel, b.rootLabel)).map((group) => `
+    <div class="dsu-group${group.changed ? " changed" : ""}">
+      <span class="dsu-group-root">root ${escapeHtml(group.rootLabel)}</span>
+      <span class="dsu-group-members">{${escapeHtml(group.memberLabels.join(", "))}}</span>
+    </div>`).join("");
+  tutorDsuDetail.innerHTML = `
+    <div>
+      <div class="dsu-detail-label">Parents</div>
+      <div class="dsu-parent-row">${parents}</div>
+    </div>
+    <div>
+      <div class="dsu-detail-label">Groups</div>
+      <div class="dsu-group-row">${groups}</div>
+    </div>`;
+}
+
+function renderTutorDsu(frames, heap) {
+  const tab = getActiveTab();
+  const sets = findDsuSets(frames, heap);
+  if (!sets.length) {
+    tutorDsuLegend.innerHTML = `<p class="dsu-note">No disjoint set in memory at this step. Use a list or dict named <code>parent</code>, <code>parents</code>, <code>par</code>, or <code>uf</code>. Rank and size are counted from those links.</p>`;
+    tutorDsuCanvas.innerHTML = `<p class="tutor-empty">Parents and groups show up here once a parent array is in memory. A fresh <code>parent = list(range(n))</code> is one group per node, each of rank 0 and size 1.</p>`;
+    tutorDsuParents.innerHTML = `<div class="dsu-organize-label">Parent list</div><p class="tutor-empty">The parent array shows up here, beside the tree.</p>`;
+    tutorDsuByRank.innerHTML = `<div class="dsu-organize-label">By rank</div><p class="tutor-empty">Filled from the parent links. The code does not set this.</p>`;
+    tutorDsuBySize.innerHTML = `<div class="dsu-organize-label">By size</div><p class="tutor-empty">Filled from the parent links. The code does not set this.</p>`;
+    tutorDsuDetail.innerHTML = "";
+    return;
+  }
+
+  const described = sets.find((set) => set.key === tab?.dsuSource) || sets[0];
+  if (tab) tab.dsuSource = described.key;
+  const previousStep = tab?.tutorSteps?.[tab.tutorStepIndex - 1];
+  const previous = previousStep
+    ? findDsuSets(previousStep.frames, previousStep.heap).find((set) => set.key === described.key)
+    : null;
+  markDsuChanges(described, previous);
+
+  const picker = sets.length > 1
+    ? `<div class="tree-legend-row"><span class="traversal-label">Parent</span>${sets.map((set) => `
+        <button class="graph-source-button${set.key === described.key ? " active" : ""}" type="button" data-dsu-source="${escapeAttr(set.key)}">${escapeHtml(set.name)}</button>`).join("")}</div>`
+    : "";
+  tutorDsuLegend.innerHTML = `
+    ${picker}
+    <div class="tree-legend-row">
+      <span class="tree-chip active"><strong>${escapeHtml(described.name)}</strong></span>
+      <span class="tree-key">${described.groups.length} group${described.groups.length === 1 ? "" : "s"}</span>
+      <span class="tree-key"><span class="tree-swatch active"></span>Node we're on</span>
+      <span class="tree-key"><span class="tree-swatch parent"></span>Its parent</span>
+      <span class="tree-key"><span class="tree-swatch changed-link"></span>Link just changed</span>
+    </div>
+    <p class="dsu-note">Rank is the height of each tree. Size is how many nodes share a root. Both update from the parent links, even when the code never stores rank or size.</p>`;
+
+  const pointers = collectDsuPointers(frames, described.nodes);
+  const here = currentDsuNode(pointers);
+  tutorDsuCanvas.innerHTML = renderDsuSvg(described, pointers, here);
+  renderDsuParentBoard(described, here);
+  tutorDsuByRank.innerHTML = `<div class="dsu-organize-label">By rank</div>${renderDsuCards(described.groups, "rank")}`;
+  tutorDsuBySize.innerHTML = `<div class="dsu-organize-label">By size</div>${renderDsuCards(described.groups, "size")}`;
+  renderDsuDetail(described);
+}
+
+const TUTOR_VIEWS = ["memory", "tree", "graph", "path", "dsu"];
 
 function applyTutorView(tab) {
   const view = TUTOR_VIEWS.includes(tab?.tutorView) ? tab.tutorView : "memory";
@@ -2642,7 +3089,8 @@ function applyTutorView(tab) {
   tutorTreeView.hidden = view !== "tree";
   tutorGraphView.hidden = view !== "graph";
   tutorPathView.hidden = view !== "path";
-  [[tutorMemoryViewButton, "memory"], [tutorTreeViewButton, "tree"], [tutorGraphViewButton, "graph"], [tutorPathViewButton, "path"]].forEach(([button, option]) => {
+  tutorDsuView.hidden = view !== "dsu";
+  [[tutorMemoryViewButton, "memory"], [tutorTreeViewButton, "tree"], [tutorGraphViewButton, "graph"], [tutorPathViewButton, "path"], [tutorDsuViewButton, "dsu"]].forEach(([button, option]) => {
     button.classList.toggle("active", view === option);
     button.setAttribute("aria-selected", String(view === option));
   });
@@ -2698,6 +3146,7 @@ function createTab(initialCode = null) {
     graphSource: null,
     graphSearch: "bfs",
     graphZoom: GRAPH_ZOOM_DEFAULT,
+    dsuSource: null,
     focusedVar: null
   };
   tabs.push(newTab);
@@ -2940,6 +3389,8 @@ function showTutorStep(index) {
     renderTutorGraph(step.frames, step.heap, labels);
   } else if (tab.tutorView === "path") {
     renderTutorPath(step.frames, step.heap, labels);
+  } else if (tab.tutorView === "dsu") {
+    renderTutorDsu(step.frames, step.heap);
   } else {
     renderTutorMemory(step.frames, step.heap, labels, names);
   }
@@ -3150,6 +3601,7 @@ tutorMemoryViewButton.addEventListener("click", () => setTutorView("memory"));
 tutorTreeViewButton.addEventListener("click", () => setTutorView("tree"));
 tutorGraphViewButton.addEventListener("click", () => setTutorView("graph"));
 tutorPathViewButton.addEventListener("click", () => setTutorView("path"));
+tutorDsuViewButton.addEventListener("click", () => setTutorView("dsu"));
 
 function typingInVisibleField(target) {
   if (!target || target === document.body || target === document.documentElement) return false;
@@ -3253,6 +3705,13 @@ function onGraphChromeClick(event) {
 
 tutorGraphView.addEventListener("click", onGraphChromeClick);
 tutorPathView.addEventListener("click", onGraphChromeClick);
+tutorDsuView.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-dsu-source]");
+  const tab = getActiveTab();
+  if (!button || !tab) return;
+  tab.dsuSource = button.dataset.dsuSource;
+  if (tab.tutorActive) showTutorStep(tab.tutorStepIndex);
+});
 
 tutorTreeQueues.addEventListener("click", (event) => {
   const button = event.target.closest("[data-traversal-mode]");

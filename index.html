@@ -93,6 +93,7 @@
                 <button id="tutorTreeViewButton" class="view-toggle-button" type="button" role="tab" aria-selected="false">Tree</button>
                 <button id="tutorGraphViewButton" class="view-toggle-button" type="button" role="tab" aria-selected="false">Graph</button>
                 <button id="tutorPathViewButton" class="view-toggle-button" type="button" role="tab" aria-selected="false">Path</button>
+                <button id="tutorDsuViewButton" class="view-toggle-button" type="button" role="tab" aria-selected="false" title="Disjoint set union">DSU</button>
               </div>
 
               <section id="tutorGraphView" class="tutor-tree-view" hidden aria-label="Graph visualization">
@@ -126,6 +127,21 @@
                   </div>
                   <aside id="tutorPathState" class="graph-search path-state" hidden aria-label="Path management"></aside>
                 </div>
+              </section>
+
+              <section id="tutorDsuView" class="tutor-tree-view" hidden aria-label="Disjoint set union">
+                <div id="tutorDsuLegend" class="tree-legend"></div>
+                <div class="dsu-stage">
+                  <div class="dsu-forest-row">
+                    <div id="tutorDsuCanvas" class="tree-canvas"></div>
+                    <aside id="tutorDsuParents" class="dsu-parent-board" aria-label="Parent list"></aside>
+                  </div>
+                  <aside class="dsu-organize" aria-label="Groups organized by rank and size">
+                    <div id="tutorDsuByRank" class="dsu-organize-pane"></div>
+                    <div id="tutorDsuBySize" class="dsu-organize-pane"></div>
+                  </aside>
+                </div>
+                <div id="tutorDsuDetail" class="dsu-detail"></div>
               </section>
 
               <section id="tutorTreeView" class="tutor-tree-view" hidden aria-label="Tree visualization">
